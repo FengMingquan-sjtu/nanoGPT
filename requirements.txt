@@ -1,0 +1,14 @@
+torch
+deepspeed==0.17.1
+transformers==4.38.2
+datasets
+accelerate==0.34.1
+sentencepiece
+streamlit
+flask
+pandas
+jsonlines
+tiktoken
+wandb
+tqdm
+numpy
