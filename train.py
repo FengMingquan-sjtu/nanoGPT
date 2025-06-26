@@ -28,6 +28,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
 from model import GPTConfig, GPT
+from model import get_loss_rho
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
@@ -39,6 +40,7 @@ eval_iters = 200
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
+ref_model_ckpt = None # reference model file, used for data selection
 # wandb logging
 wandb_log = False # disabled by default
 wandb_project = 'owt'
@@ -193,6 +195,28 @@ if block_size < model.config.block_size:
     model_args['block_size'] = block_size # so that the checkpoint will have the right value
 model.to(device)
 
+
+# load reference model checkpoint, used for data selection
+ref_model = None
+if ref_model_ckpt is not None:
+    print(f"Loading reference model from {ref_model_ckpt}")
+    # resume training from a checkpoint.
+    ref_checkpoint = torch.load(ref_model_ckpt, map_location=device)
+    ref_model_args = ref_checkpoint['model_args']
+    # create the model
+    ref_gptconf = GPTConfig(**ref_model_args)
+    ref_model = GPT(ref_gptconf)
+    ref_state_dict = ref_checkpoint['model']
+    # fix the keys of the state dictionary :(
+    # honestly no idea how checkpoints sometimes get this prefix, have to debug more
+    unwanted_prefix = '_orig_mod.'
+    for k,v in list(ref_state_dict.items()):
+        if k.startswith(unwanted_prefix):
+            ref_state_dict[k[len(unwanted_prefix):]] = ref_state_dict.pop(k)
+    ref_model.load_state_dict(ref_state_dict)
+    ref_model.to(device)
+    ref_model.eval()
+
 # initialize a GradScaler. If enabled=False scaler is a no-op
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 
@@ -207,10 +231,16 @@ if compile:
     print("compiling the model... (takes a ~minute)")
     unoptimized_model = model
     model = torch.compile(model) # requires PyTorch 2.0
+    if ref_model is not None:
+        # compile the reference model as well, if it exists
+        ref_model = torch.compile(ref_model)
 
 # wrap model into DDP container
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
+    if ref_model is not None:
+        # wrap the reference model into DDP container as well, if it exists
+        ref_model = DDP(ref_model, device_ids=[ddp_local_rank])
 
 # helps estimate an arbitrarily accurate loss over either split using many batches
 @torch.no_grad()
@@ -266,12 +296,11 @@ while True:
         print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
         if wandb_log:
             wandb.log({
-                "iter": iter_num,
                 "train/loss": losses['train'],
                 "val/loss": losses['val'],
                 "lr": lr,
                 "mfu": running_mfu*100, # convert to percentage
-            })
+            }, step=iter_num)
         if losses['val'] < best_val_loss or always_save_checkpoint:
             best_val_loss = losses['val']
             if iter_num > 0:
@@ -284,7 +313,7 @@ while True:
                     'config': config,
                 }
                 print(f"saving checkpoint to {out_dir}")
-                torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
+                torch.save(checkpoint, os.path.join(out_dir, f'ckpt-{iter_num}.pt'))
     if iter_num == 0 and eval_only:
         break
 
@@ -298,7 +327,8 @@ while True:
             # looking at the source of that context manager, it just toggles this variable
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
-            logits, loss = model(X, Y)
+            logits, _ = model(X, Y)
+            loss = get_loss_rho(logits, Y, ref_model, X)
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = get_batch('train')
@@ -326,6 +356,7 @@ while True:
             mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
             running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
         print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%, remaining {(max_iters - iter_num) * dt / 3600:.2f}h")
+        if wandb_log: wandb.log({"train/loss-single-step": lossf,}, step=iter_num)
     iter_num += 1
     local_iter_num += 1
 

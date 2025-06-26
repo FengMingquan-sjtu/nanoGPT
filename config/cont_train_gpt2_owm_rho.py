@@ -1,14 +1,17 @@
 
-#nohup torchrun --standalone --nproc_per_node=8 train.py config/cont_train_gpt2_owm.py > log/owm.log 2>&1 &
+#cmds
+#OMP_NUM_THREADS=8 nohup torchrun --standalone --nproc_per_node=8 train.py config/cont_train_gpt2_owm_rho.py > log/owm-rho.log 2>&1 &
+#python train.py config/cont_train_gpt2_owm_rho.py
+#compile = False # for fast try.
 
 #I/O
 init_from = 'gpt2' # load openai pretrained gpt2 model
-out_dir = 'out/cont-gpt2-124M-owm-15B' # output directory for checkpoints and logs
-
+out_dir = 'out/cont-gpt2-124M-owm-15B-rho' # output directory for checkpoints and logs
+ref_model_ckpt = 'out/cont-gpt2-owm-37B/ckpt.pt'
 #wandb
 wandb_log = True
 wandb_project = 'owm'
-wandb_run_name='cont-gpt2-15B'
+wandb_run_name='cont-gpt2-15B-rho'
 
 #data
 dataset = '/cpfs/user/fengmingquan/dataset/processed-gpt2/open-web-math' # path to processed dataset
