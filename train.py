@@ -15,7 +15,7 @@ $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 --master_addr=123.456.123
 $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123.456 --master_port=1234 train.py
 (If your cluster does not have Infiniband interconnect prepend NCCL_IB_DISABLE=1)
 """
-
+import sys
 import os
 import time
 import math
@@ -28,10 +28,13 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
 from model import GPTConfig, GPT
-from model import get_loss_rho
+from model import get_loss_rho, token_select_rho
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
+# rho algorithm
+token_keep_ratio = 0.5 # keep 50% of tokens, i.e. 1/2 of the original dataset
+
 # I/O
 out_dir = 'out'
 eval_interval = 2000
@@ -79,6 +82,14 @@ config_keys = [k for k,v in globals().items() if not k.startswith('_') and isins
 exec(open('configurator.py').read()) # overrides from command line or config file
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
 # -----------------------------------------------------------------------------
+if int(os.environ.get('RANK', -1)) <= 0:
+    out_dir = os.path.join(out_dir, f'{time.strftime("%Y-%m-%d_%H-%M-%S")}')
+    os.makedirs(out_dir)
+    out_file = os.path.join(out_dir, 'out.log')
+    sys.stdout = open(out_file, 'a', buffering=30)
+    sys.stderr = open(out_file, 'a', buffering=30)
+    print("configs are:", config)
+# -----------------------------------------------------------------------------
 
 # various inits, derived attributes, I/O setup
 ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
@@ -103,8 +114,7 @@ else:
 tokens_per_iter = gradient_accumulation_steps * ddp_world_size * batch_size * block_size
 print(f"tokens per iteration will be: {tokens_per_iter:,}")
 
-if master_process:
-    os.makedirs(out_dir, exist_ok=True)
+
 torch.manual_seed(1337 + seed_offset)
 torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
 torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
@@ -355,7 +365,7 @@ while True:
         if local_iter_num >= 5: # let the training loop settle a bit
             mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
             running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
-        print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%, remaining {(max_iters - iter_num) * dt / 3600:.2f}h")
+        print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%, remaining {(max_iters - iter_num) * dt / 3600:.2f}h", flush=True)
         if wandb_log: wandb.log({"train/loss-single-step": lossf,}, step=iter_num)
     iter_num += 1
     local_iter_num += 1

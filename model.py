@@ -329,8 +329,27 @@ class GPT(nn.Module):
 
         return idx
 
+def token_select_rho(logits, targets, ref_model, idx, ratio=0.5):
+    ignore_idx = -1 # the index of the token to ignore in the targets
+    b, t, vocab_size = logits.size()
+    #logits shape (b, t, vocab_size), targets shape (b, t), token_loss shape (b*t)
+    
+    with torch.no_grad():
+        token_loss = F.cross_entropy(logits.view(-1, vocab_size), targets.view(-1), ignore_index=ignore_idx, reduction='none')
+        ref_logits, _ = ref_model(idx, targets)
+        ref_token_loss = F.cross_entropy(ref_logits.view(-1, vocab_size), targets.view(-1), ignore_index=ignore_idx, reduction='none')
+        diff_token_loss = token_loss - ref_token_loss
+        ignore_mask = (targets.view(-1) == ignore_idx)
+        diff_token_loss = diff_token_loss.masked_fill(ignore_mask, -1e8) # ignore the -1 targets
+        diff_token_loss = diff_token_loss.view(b, -1) # reshape to (b, t)
+        # select the top-k tokens with the highest diff_token_loss
+        n_tokens = int(ratio * t) # select 50% of the tokens
+        n_tokens = max(1, min(n_tokens, t)) 
+        top_k = torch.topk(diff_token_loss, k=n_tokens, dim=1).indices #shape (b, n_tokens)
+        return top_k 
 
-def get_loss_rho(logits, targets, ref_model=None, idx=None):
+
+def get_loss_rho(logits, targets, ref_model=None, idx=None, ratio=0.5):
     """
     Calculate the loss given the logits and targets.
     If ref_model is provided, use it to calculate the reference logits for KL divergence.
@@ -340,16 +359,7 @@ def get_loss_rho(logits, targets, ref_model=None, idx=None):
         b, t, vocab_size = logits.size()
         #logits shape (b, t, vocab_size), targets shape (b, t), token_loss shape (b*t)
         token_loss = F.cross_entropy(logits.view(-1, vocab_size), targets.view(-1), ignore_index=ignore_idx, reduction='none')
-        with torch.no_grad():
-            ref_logits, _ = ref_model(idx, targets)
-            ref_token_loss = F.cross_entropy(ref_logits.view(-1, vocab_size), targets.view(-1), ignore_index=ignore_idx, reduction='none')
-            diff_token_loss = token_loss - ref_token_loss
-            ignore_mask = (targets.view(-1) == ignore_idx)
-            diff_token_loss = diff_token_loss.masked_fill(ignore_mask, -1e8) # ignore the -1 targets
-            diff_token_loss = diff_token_loss.view(b, -1) # reshape to (b, t)
-            # select the top-k tokens with the highest diff_token_loss
-            n_tokens = int(0.5 * t) # select 50% of the tokens
-            top_k = torch.topk(diff_token_loss, k=n_tokens, dim=1).indices #shape (b, n_tokens)
+        top_k = token_select_rho(logits, targets, ref_model, idx, ratio)
         # gather the average loss for the top-k tokens
         #loss = loss.masked_fill(ignore_mask, 0.0) #TODO: filter out the -1 targets
         loss = token_loss.reshape(b, -1) # shape (b, t) 
