@@ -1,26 +1,34 @@
 
-#cmds
-#OMP_NUM_THREADS=8 nohup torchrun --standalone --nproc_per_node=8 train.py config/cont_train_gpt2_owm_rho.py > log/owm-rho.log 2>&1 &
+#---- cmds -----
+#CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+#OMP_NUM_THREADS=4 nohup torchrun --standalone --nproc_per_node 8 train.py config/cont_train_gpt2_owm_rho.py > log/owm-rho.log 2>&1 &
 #python train.py config/cont_train_gpt2_owm_rho.py
 #compile = False # for fast try.
 
+#---- job cmds -----
+#cd /cpfs/user/fengmingquan/nanoGPT
+#OMP_NUM_THREADS=4 /cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/torchrun --standalone --nproc_per_node 8 train.py config/cont_train_gpt2_owm_rho.py \
+#--token_keep_ratio=0.6 --wandb_run_name='cont-gpt2-7.5B-0.6rho' --out_dir='out/cont-gpt2-124M-owm-7.5B-0.6rho'
+# rho-algorithm
+token_keep_ratio = 0.5 
+
 #I/O
 init_from = 'gpt2' # load openai pretrained gpt2 model
-out_dir = 'out/cont-gpt2-124M-owm-15B-rho' # output directory for checkpoints and logs
+out_dir = 'out/cont-gpt2-124M-owm-7.5B-0.5rho' # output directory for checkpoints and logs
 ref_model_ckpt = 'out/cont-gpt2-owm-37B/ckpt.pt'
 #wandb
 wandb_log = True
 wandb_project = 'owm'
-wandb_run_name='cont-gpt2-15B-rho'
+wandb_run_name='cont-gpt2-7.5B-0.5rho'
 
 #data
 dataset = '/cpfs/user/fengmingquan/dataset/processed-gpt2/open-web-math' # path to processed dataset
 
 # these make the total batch size be ~0.5M
 # 12 batch size * 1024 block size * 5 gradaccum * 8 GPUs = 491,520
-batch_size = 12 * 5
+batch_size = 6 * 5
 block_size = 1024
-gradient_accumulation_steps = 8
+gradient_accumulation_steps = 8 * 2
 
 # optimizer and lr
 # token per iter = 491,520

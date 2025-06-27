@@ -30,6 +30,7 @@ from torch.distributed import init_process_group, destroy_process_group
 from model import GPTConfig, GPT
 from model import get_loss_rho, token_select_rho
 
+os.environ["WANDB_API_KEY"] = "b7f26328382adc825eb193aac3f30f07e7da99c1" # set your wandb api key here
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # rho algorithm
@@ -338,7 +339,7 @@ while True:
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
             logits, _ = model(X, Y)
-            loss = get_loss_rho(logits, Y, ref_model, X)
+            loss = get_loss_rho(logits, Y, ref_model, X, token_keep_ratio)
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = get_batch('train')

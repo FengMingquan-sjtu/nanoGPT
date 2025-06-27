@@ -359,10 +359,14 @@ def get_loss_rho(logits, targets, ref_model=None, idx=None, ratio=0.5):
         b, t, vocab_size = logits.size()
         #logits shape (b, t, vocab_size), targets shape (b, t), token_loss shape (b*t)
         token_loss = F.cross_entropy(logits.view(-1, vocab_size), targets.view(-1), ignore_index=ignore_idx, reduction='none')
+        #top_k = torch.randint(0, t, (b, int(ratio * t)), device=logits.device)
         top_k = token_select_rho(logits, targets, ref_model, idx, ratio)
         # gather the average loss for the top-k tokens
-        #loss = loss.masked_fill(ignore_mask, 0.0) #TODO: filter out the -1 targets
-        loss = token_loss.reshape(b, -1) # shape (b, t) 
+        ignore_mask = (targets.view(-1) == ignore_idx) # shape (b*t,)
+        loss = token_loss.masked_fill(ignore_mask, 0.0)  #shape (b*t,)
+        loss = loss.reshape(b, -1) # shape (b, t) 
+        # random selection of tokens to calculate the loss
+        
         loss = loss.gather(1, top_k) # shape (b, n_tokens)
         loss = loss.mean() # average over the batch
     else:
