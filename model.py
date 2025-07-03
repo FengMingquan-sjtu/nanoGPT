@@ -259,6 +259,24 @@ class GPT(nn.Module):
                     sd[k].copy_(sd_hf[k])
 
         return model
+    
+    @classmethod
+    def to_gpt2_state_dict(cls, nanogpt_state_dict):
+        unwanted_prefix = '_orig_mod.'
+        for k,v in list(nanogpt_state_dict.items()):
+            if k.startswith(unwanted_prefix):
+                nanogpt_state_dict[k[len(unwanted_prefix):]] = nanogpt_state_dict.pop(k)
+        transposed = ['attn.c_attn.weight', 'attn.c_proj.weight', 'mlp.c_fc.weight', 'mlp.c_proj.weight']
+        # basically the openai checkpoints use a "Conv1D" module, but we only want to use a vanilla Linear
+        # this means that we have to transpose these weights when we import them
+        sd_hf = dict() # make a copy of the state dict
+        for k in nanogpt_state_dict.keys():
+            if any(k.endswith(w) for w in transposed):                
+                with torch.no_grad():
+                    sd_hf[k] = nanogpt_state_dict[k].t().clone()
+            else:
+                sd_hf[k] = nanogpt_state_dict[k].clone()
+        return sd_hf
 
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
         # start with all of the candidate parameters
@@ -372,5 +390,5 @@ def get_loss_rho(logits, targets, ref_model=None, idx=None, ratio=0.5):
     else:
         # standard cross-entropy loss
         # reshape logits and targets to be of shape (b*t, vocab_size) and (b*t,)
-        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=ignore_idx)
     return loss
