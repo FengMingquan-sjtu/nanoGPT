@@ -89,7 +89,7 @@ if int(os.environ.get('RANK', -1)) <= 0:
     out_file = os.path.join(out_dir, 'out.log')
     sys.stdout = open(out_file, 'a', buffering=30)
     sys.stderr = open(out_file, 'a', buffering=30)
-    print("configs are:", config)
+    print("configs are:", config, flush=True)
 # -----------------------------------------------------------------------------
 
 # various inits, derived attributes, I/O setup
@@ -99,6 +99,7 @@ if ddp:
     ddp_rank = int(os.environ['RANK'])
     ddp_local_rank = int(os.environ['LOCAL_RANK'])
     ddp_world_size = int(os.environ['WORLD_SIZE'])
+    print(f"Running in DDP mode with rank {ddp_rank} (local {ddp_local_rank}) and world size {ddp_world_size}")
     device = f'cuda:{ddp_local_rank}'
     torch.cuda.set_device(device)
     master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
@@ -183,13 +184,7 @@ elif init_from == 'resume':
     gptconf = GPTConfig(**model_args)
     model = GPT(gptconf)
     state_dict = checkpoint['model']
-    # fix the keys of the state dictionary :(
-    # honestly no idea how checkpoints sometimes get this prefix, have to debug more
-    unwanted_prefix = '_orig_mod.'
-    for k,v in list(state_dict.items()):
-        if k.startswith(unwanted_prefix):
-            state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
-    model.load_state_dict(state_dict)
+    model.load_ckp_state_dict(state_dict)
     iter_num = checkpoint['iter_num']
     best_val_loss = checkpoint['best_val_loss']
 elif init_from.startswith('gpt2'):
@@ -218,13 +213,7 @@ if ref_model_ckpt is not None:
     ref_gptconf = GPTConfig(**ref_model_args)
     ref_model = GPT(ref_gptconf)
     ref_state_dict = ref_checkpoint['model']
-    # fix the keys of the state dictionary :(
-    # honestly no idea how checkpoints sometimes get this prefix, have to debug more
-    unwanted_prefix = '_orig_mod.'
-    for k,v in list(ref_state_dict.items()):
-        if k.startswith(unwanted_prefix):
-            ref_state_dict[k[len(unwanted_prefix):]] = ref_state_dict.pop(k)
-    ref_model.load_state_dict(ref_state_dict)
+    ref_model.load_ckp_state_dict(ref_state_dict)
     ref_model.to(device)
     ref_model.eval()
 

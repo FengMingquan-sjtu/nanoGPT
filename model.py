@@ -278,6 +278,19 @@ class GPT(nn.Module):
                 sd_hf[k] = nanogpt_state_dict[k].clone()
         return sd_hf
 
+    def load_ckp_state_dict(self, ckp_state_dict):
+        """
+        Load a state dict from a checkpoint, which may have been saved with a different config.
+        This is useful for resuming training or evaluation from a checkpoint.
+        """
+        # remove the unwanted prefix if it exists
+        unwanted_prefix = '_orig_mod.'
+        for k,v in list(ckp_state_dict.items()):
+            if k.startswith(unwanted_prefix):
+                ckp_state_dict[k[len(unwanted_prefix):]] = ckp_state_dict.pop(k)
+        # load the state dict into the model
+        self.load_state_dict(ckp_state_dict, strict=False)
+
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
         # start with all of the candidate parameters
         param_dict = {pn: p for pn, p in self.named_parameters()}
