@@ -1,11 +1,11 @@
 #!/bin/bash
 # This script evaluates the perplexity of a model on the GSM8K dataset using the eval_ppl.py script.
 # Usage:
-#   nohup bash eval_ppl.sh > eval_ppl.out 2>&1 &
-model_path="out/cont-gpt2-124M-owm-7.5B-1.0rho/2025-06-29_11-51-42"
-model_arch="gpt2"  # Specify the model architecture, must be one of ["gpt2", "gpt2-medium", "gpt2-large", "gpt2-xl"]
-wandb_id="djsrergc"
-gpu_id=2
+#   nohup bash eval_ppl.sh > log/eval_ppl_0.out 2>&1 &
+model_path="out/cont-gpt2-0.7B-owm-7.5B-0.8rho/2025-07-04_20-00-17"
+model_arch="gpt2-large"  # Specify the model architecture, must be one of ["gpt2", "gpt2-medium", "gpt2-large", "gpt2-xl"]
+wandb_id="d5dck7ho"
+gpu_id=4
 
 checkpoints=(
     0 2000 4000 6000 8000

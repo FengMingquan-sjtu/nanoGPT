@@ -12,3 +12,6 @@ tiktoken
 wandb
 tqdm
 numpy
+scikit-learn
+matplotlib
+seaborn
