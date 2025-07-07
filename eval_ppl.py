@@ -159,6 +159,8 @@ def main():
     parser = argparse.ArgumentParser(description='Evaluate model perplexity on benchmark datasets')
     parser.add_argument('--model_path', type=str, required=True, 
                        help='Path to model checkpoint or pretrained model name')
+    parser.add_argument('--model_arch', type=str, default='gpt2-xl',
+                       help='Model architecture to use, choose from: gpt2, gpt2-medium, gpt2-large, gpt2-xl')
     parser.add_argument('--data_path', type=str, default='openai/gsm8k',
                        help='Path to dataset or dataset name (default: openai/gsm8k)')
     parser.add_argument('--ckpt_step', type=int, default=0,

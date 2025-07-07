@@ -386,7 +386,7 @@ def get_loss_rho(logits, targets, ref_model=None, idx=None, ratio=0.5):
     If ref_model is provided, use it to calculate the reference logits for KL divergence.
     """
     ignore_idx = -1 # the index of the token to ignore in the targets
-    if ref_model is not None:
+    if ref_model is not None: #selection tokens by rho-1 algorithm.
         b, t, vocab_size = logits.size()
         #logits shape (b, t, vocab_size), targets shape (b, t), token_loss shape (b*t)
         token_loss = F.cross_entropy(logits.view(-1, vocab_size), targets.view(-1), ignore_index=ignore_idx, reduction='none')
@@ -396,10 +396,22 @@ def get_loss_rho(logits, targets, ref_model=None, idx=None, ratio=0.5):
         ignore_mask = (targets.view(-1) == ignore_idx) # shape (b*t,)
         loss = token_loss.masked_fill(ignore_mask, 0.0)  #shape (b*t,)
         loss = loss.reshape(b, -1) # shape (b, t) 
-        # random selection of tokens to calculate the loss
-        
         loss = loss.gather(1, top_k) # shape (b, n_tokens)
-        loss = loss.mean() # average over the batch
+        #loss = loss.mean() # BUG: each sample in the batch may have different number of tokens, so we cannot average over the batch
+        # instead, we will average over the selected tokens, as below:
+        loss_accum = 0.0
+        n_tokens_accum = 0 
+        for i in range(b):
+            n_ignore = ignore_mask[i].sum().item() # number of ignored tokens in the sample
+            n_tokens = t - n_ignore # number of valid tokens in the sample
+            n_tokens = int(ratio * n_tokens) # number of tokens to select
+            if n_tokens > 0:
+                loss_accum += loss[i][:n_tokens].sum() # sum the loss for the selected tokens 
+                n_tokens_accum += n_tokens
+        if n_tokens_accum == 0:
+            loss = torch.tensor(0.0, device=logits.device)
+        else:
+            loss = loss_accum / n_tokens_accum # average over the selected tokens
     else:
         # standard cross-entropy loss
         # reshape logits and targets to be of shape (b*t, vocab_size) and (b*t,)
