@@ -65,12 +65,12 @@ class GSM8KDataset(Dataset):
         torch_q_ids = torch.tensor(q_ids, dtype=torch.int64) #shape: (q_seq_len,)
         torch_a_ids = torch.tensor(a_ids, dtype=torch.int64) #shape: (a_seq_len,)
         x = torch.cat((torch_q_ids, torch_a_ids), dim=0)  # shape: (q_seq_len + a_seq_len,)
-        y = torch.cat((torch_q_ids[1:], torch_a_ids), dim=0)  # shape: (q_seq_len + a_seq_len - 1,)
+        y = F.pad(torch_a_ids, (len(torch_q_ids)-1, 0), value=-1) # shape: (q_seq_len + a_seq_len - 1,).  Pad with -1 (ignore index) for the question part
         # Ensure x and y are of the same length block size
         if len(x) < self.block_size:
             padding_length = self.block_size - len(x)
-            x = F.pad(x, (0, padding_length), value=x[-1])  # pad x with last token (eos)
-            y = F.pad(y, (0, padding_length+1), value=-1)  # pad y with -1 (ignore index)
+            x = F.pad(x, (0, padding_length), value=x[-1])  # right pad x with last token (eos)
+            y = F.pad(y, (0, padding_length+1), value=-1)  # right pad y with -1 (ignore index)
         elif len(x) > self.block_size:
             x = x[-self.block_size:]
             y = y[-self.block_size:]
@@ -237,10 +237,10 @@ def main():
     
     if args.wandb_id:
         wandb.init(id=args.wandb_id, resume='must', project="owm")
-        wandb.define_metric("gsm8k/perplexity", step_metric="step")
+        wandb.define_metric("gsm8k/ppl", step_metric="train_step")
         wandb.log({
-            'gsm8k/perplexity': perplexity,
-            'step': args.ckpt_step,
+            'gsm8k/ppl': perplexity,
+            'train_step': args.ckpt_step,
         })
         wandb.finish()
         print(f"Results logged to WandB run {args.wandb_id}")
