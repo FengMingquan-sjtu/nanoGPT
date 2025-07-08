@@ -1,9 +1,12 @@
 import os
 from contextlib import nullcontext
 import argparse
+import pickle
+import json
 
 import torch
 import torch.nn as nn
+import torch.utils.data as data
 import numpy as np
 from typing import List, Dict, Tuple, Set
 import tiktoken
@@ -14,13 +17,55 @@ from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
 import seaborn as sns
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Union
 import pandas as pd
 from collections import Counter, defaultdict
 
 from eval_ppl import  GSM8KDataset,load_model
 from model import GPT, GPTConfig
 
+class TextDataset(data.Dataset):
+    def __init__(self, data_dir, split, block_size, length=None):
+        """
+        Args:
+            data_dir: 数据目录路径
+            split: 'train' 或 'val'
+            block_size: 序列长度
+            length: 数据集大小（None表示使用所有可能的序列）
+        """
+        self.data_dir = data_dir
+        self.split = split
+        self.block_size = block_size
+        
+        # 数据文件路径
+        if split == 'train':
+            self.data_path = os.path.join(data_dir, 'train.bin')
+        else:
+            self.data_path = os.path.join(data_dir, 'val.bin')
+        
+        # 获取数据长度
+        self.data = np.memmap(self.data_path, dtype=np.uint16, mode='r')
+        self.data_length = len(self.data)
+        
+        # 可能的起始位置数量
+        max_length = self.data_length - block_size
+        self.length = length if length is not None else max_length
+        
+    def __len__(self):
+        return self.length
+    
+    def __getitem__(self, idx):
+        # 重新创建 memmap 以避免内存泄漏
+        data = np.memmap(self.data_path, dtype=np.uint16, mode='r')
+        
+        # 随机选择起始位置（保持原有的随机性）
+        start_idx = torch.randint(0, len(data) - self.block_size, (1,)).item()
+        
+        x = torch.from_numpy((data[start_idx:start_idx+self.block_size]).astype(np.int64))
+        y = torch.from_numpy((data[start_idx+1:start_idx+1+self.block_size]).astype(np.int64))
+        
+        return x, y
+    
 class GPTFeatureExtractor:
     """GPT模型深度特征提取器"""
     
@@ -79,7 +124,8 @@ class GPTFeatureExtractor:
         def get_features(name):
             def hook(model, input, output):
                 # output shape: (batch_size, seq_len, hidden_dim)
-                self.features[name] = output.detach().cpu()
+                #self.features[name] = output.detach().cpu()
+                self.features[name] = output.detach()
             return hook
         
         # 为指定层注册hook
@@ -228,25 +274,238 @@ class GPTFeatureExtractor:
         self.hooks = []
 
 
+class TorchStandardScaler:
+    """PyTorch版本的StandardScaler"""
+    def __init__(self, device='cuda'):
+        self.device = device
+        self.mean_ = None
+        self.std_ = None
+        self.fitted = False
+    
+    def fit(self, X: torch.Tensor):
+        """拟合缩放参数"""
+        if not isinstance(X, torch.Tensor):
+            X = torch.tensor(X, device=self.device, dtype=torch.float32)
+        else:
+            X = X.to(self.device).float()
+            
+        self.mean_ = torch.mean(X, dim=0)
+        self.std_ = torch.std(X, dim=0, unbiased=False)
+        # 避免除零
+        self.std_ = torch.where(self.std_ == 0, torch.ones_like(self.std_), self.std_)
+        self.fitted = True
+        return self
+    
+    def transform(self, X: torch.Tensor) -> torch.Tensor:
+        """应用缩放"""
+        if not self.fitted:
+            raise ValueError("Scaler has not been fitted yet.")
+        
+        if not isinstance(X, torch.Tensor):
+            X = torch.tensor(X, device=self.device, dtype=torch.float32)
+        else:
+            X = X.to(self.device).float()
+            
+        return (X - self.mean_) / self.std_
+    
+    def fit_transform(self, X: torch.Tensor) -> torch.Tensor:
+        """拟合并转换"""
+        return self.fit(X).transform(X)
+    
+    def inverse_transform(self, X: torch.Tensor) -> torch.Tensor:
+        """逆变换"""
+        if not self.fitted:
+            raise ValueError("Scaler has not been fitted yet.")
+            
+        if not isinstance(X, torch.Tensor):
+            X = torch.tensor(X, device=self.device, dtype=torch.float32)
+        else:
+            X = X.to(self.device).float()
+            
+        return X * self.std_ + self.mean_
+
+class TorchPCA:
+    """PyTorch版本的PCA"""
+    def __init__(self, n_components=50, device='cuda'):
+        self.n_components = n_components
+        self.device = device
+        self.components_ = None
+        self.explained_variance_ = None
+        self.mean_ = None
+        self.fitted = False
+    
+    def fit(self, X: torch.Tensor):
+        """拟合PCA"""
+        if not isinstance(X, torch.Tensor):
+            X = torch.tensor(X, device=self.device, dtype=torch.float32)
+        else:
+            X = X.to(self.device).float()
+        
+        # 中心化数据
+        self.mean_ = torch.mean(X, dim=0)
+        X_centered = X - self.mean_
+        
+        # SVD分解
+        U, S, Vt = torch.linalg.svd(X_centered, full_matrices=False)
+        
+        # 保存主成分
+        self.components_ = Vt[:self.n_components]
+        self.explained_variance_ = (S[:self.n_components] ** 2) / (X.shape[0] - 1)
+        self.fitted = True
+        return self
+    
+    def transform(self, X: torch.Tensor) -> torch.Tensor:
+        """应用PCA变换"""
+        if not self.fitted:
+            raise ValueError("PCA has not been fitted yet.")
+        
+        if not isinstance(X, torch.Tensor):
+            X = torch.tensor(X, device=self.device, dtype=torch.float32)
+        else:
+            X = X.to(self.device).float()
+        
+        X_centered = X - self.mean_
+        return torch.mm(X_centered, self.components_.T)
+    
+    def fit_transform(self, X: torch.Tensor) -> torch.Tensor:
+        """拟合并变换"""
+        return self.fit(X).transform(X)
+
+class TorchKMeans:
+    """PyTorch版本的K-Means"""
+    def __init__(self, n_clusters=8, max_iters=100, tol=1e-4, device='cuda', random_state=None):
+        self.n_clusters = n_clusters
+        self.max_iters = max_iters
+        self.tol = tol
+        self.device = device
+        self.random_state = random_state
+        
+        self.cluster_centers_ = None
+        self.labels_ = None
+        self.inertia_ = None
+        self.fitted = False
+        
+        if random_state is not None:
+            torch.manual_seed(random_state)
+    
+    def _init_centroids(self, X: torch.Tensor) -> torch.Tensor:
+        """初始化聚类中心"""
+        n_samples, n_features = X.shape
+        centroids = torch.zeros(self.n_clusters, n_features, device=self.device)
+        
+        # K-means++初始化
+        # 随机选择第一个中心
+        centroids[0] = X[torch.randint(n_samples, (1,))]
+        
+        for i in range(1, self.n_clusters):
+            # 计算到最近中心的距离
+            distances = torch.cdist(X, centroids[:i])
+            min_distances = torch.min(distances, dim=1)[0]
+            
+            # 基于距离的概率选择下一个中心
+            probabilities = min_distances / torch.sum(min_distances)
+            cumulative_probs = torch.cumsum(probabilities, dim=0)
+            r = torch.rand(1, device=self.device)
+            
+            # 选择下一个中心
+            selected_idx = torch.searchsorted(cumulative_probs, r)
+            selected_idx = torch.clamp(selected_idx, 0, n_samples - 1)
+            centroids[i] = X[selected_idx]
+        
+        return centroids
+    
+    def fit(self, X: torch.Tensor):
+        """拟合K-means"""
+        if not isinstance(X, torch.Tensor):
+            X = torch.tensor(X, device=self.device, dtype=torch.float32)
+        else:
+            X = X.to(self.device).float()
+        
+        n_samples, n_features = X.shape
+        
+        # 初始化聚类中心
+        centroids = self._init_centroids(X)
+        
+        prev_inertia = float('inf')
+        
+        for iteration in range(self.max_iters):
+            # 分配样本到最近的聚类中心
+            distances = torch.cdist(X, centroids)
+            labels = torch.argmin(distances, dim=1)
+            
+            # 更新聚类中心
+            new_centroids = torch.zeros_like(centroids)
+            for k in range(self.n_clusters):
+                mask = labels == k
+                if torch.sum(mask) > 0:
+                    new_centroids[k] = torch.mean(X[mask], dim=0)
+                else:
+                    new_centroids[k] = centroids[k]
+            
+            # 计算inertia（样本到聚类中心的距离平方和）
+            inertia = torch.sum((X - centroids[labels]) ** 2)
+            
+            # 检查收敛
+            if abs(prev_inertia - inertia) < self.tol:
+                break
+            
+            centroids = new_centroids
+            prev_inertia = inertia
+        
+        self.cluster_centers_ = centroids
+        self.labels_ = labels
+        self.inertia_ = inertia
+        self.fitted = True
+        return self
+    
+    def predict(self, X: torch.Tensor) -> torch.Tensor:
+        """预测聚类标签"""
+        if not self.fitted:
+            raise ValueError("KMeans has not been fitted yet.")
+        
+        if not isinstance(X, torch.Tensor):
+            X = torch.tensor(X, device=self.device, dtype=torch.float32)
+        else:
+            X = X.to(self.device).float()
+        
+        distances = torch.cdist(X, self.cluster_centers_)
+        return torch.argmin(distances, dim=1)
+    
+    def fit_predict(self, X: torch.Tensor) -> torch.Tensor:
+        """拟合并预测"""
+        self.fit(X)
+        return self.labels_
+
 class TokenClusteringAnalyzer:
-    """Token特征聚类分析器"""
+    """Token特征聚类分析器 - GPU加速版本"""
     
     def __init__(self, n_clusters: int = 8, random_state: int = 42,
-                 exclude_special_tokens: bool = True):
+                 exclude_special_tokens: bool = True, device: str = 'cuda'):
         self.n_clusters = n_clusters
         self.random_state = random_state
         self.exclude_special_tokens = exclude_special_tokens
-        self.kmeans = KMeans(n_clusters=n_clusters, random_state=random_state)
-        self.scaler = StandardScaler()
-        self.pca = PCA(n_components=50)  # 预降维
+        self.device = device
+        
+        # 初始化torch组件
+        self.scaler = TorchStandardScaler(device=device)
+        self.pca = TorchPCA(n_components=50, device=device)  
+        self.kmeans = TorchKMeans(n_clusters=n_clusters, device=device, random_state=random_state)
+        
+        # 用于可视化的t-SNE（保留sklearn版本）
         self.tsne = TSNE(n_components=2, random_state=random_state, perplexity=30)
         
         # 存储结果
         self.features_2d = None
         self.cluster_labels = None
         self.token_info = None
+        self.fitted = False
         
-    def prepare_data(self, extracted_features: Dict) -> Tuple[np.ndarray, List]:
+        # 设置随机种子
+        if random_state is not None:
+            torch.manual_seed(random_state)
+            np.random.seed(random_state)
+        
+    def prepare_data(self, extracted_features: Dict) -> Tuple[torch.Tensor, List]:
         """
         准备聚类数据，过滤掉特殊token
         
@@ -254,16 +513,21 @@ class TokenClusteringAnalyzer:
             extracted_features: 从GPT提取的特征字典
             
         Returns:
-            (features_array, token_info_list) - 已过滤特殊token
+            (features_tensor, token_info_list) - 已过滤特殊token，返回GPU张量
         """
         # 获取组合特征
         combined_features = extracted_features['features']['combined']  # (B, T, H)
         tokens_list = extracted_features['tokens']
-        special_mask = extracted_features.get('special_token_mask', None)
         
         # 展平为 (total_tokens, hidden_dim)
         batch_size, seq_len, hidden_dim = combined_features.shape
-        features_flat = combined_features.view(-1, hidden_dim).numpy()
+        features_flat = combined_features.view(-1, hidden_dim)
+        
+        # 转换为GPU张量
+        if not isinstance(features_flat, torch.Tensor):
+            features_flat = torch.tensor(features_flat, device=self.device, dtype=torch.float32)
+        else:
+            features_flat = features_flat.to(self.device).float()
         
         # 展平token信息
         token_info_flat = []
@@ -293,6 +557,7 @@ class TokenClusteringAnalyzer:
         
         # 只保留非特殊token的特征
         if valid_indices:
+            valid_indices = torch.tensor(valid_indices, device=self.device)
             features_filtered = features_flat[valid_indices]
         else:
             print("警告: 所有token都被过滤掉了!")
@@ -306,23 +571,31 @@ class TokenClusteringAnalyzer:
         
         return features_filtered, token_info_flat
     
-    def fit_cluster(self, features: np.ndarray, token_info: List[Dict]) -> Dict:
+    def fit_cluster(self, features: Union[torch.Tensor, np.ndarray], 
+                   token_info: List[Dict], do_tsne=False) -> Dict:
         """
         执行聚类分析
         
         Args:
-            features: token特征矩阵 (n_tokens, hidden_dim) - 已过滤特殊token
+            features: token特征矩阵 - 已过滤特殊token
             token_info: token信息列表 - 已过滤特殊token
             
         Returns:
             聚类结果字典
         """
-        print(f"开始聚类分析，数据形状: {features.shape}")
+        print(f"开始GPU聚类分析，数据形状: {features.shape}")
+        
+        # 转换为GPU张量
+        if not isinstance(features, torch.Tensor):
+            features = torch.tensor(features, device=self.device, dtype=torch.float32)
+        else:
+            features = features.to(self.device).float()
         
         if len(features) == 0:
             raise ValueError("没有有效的token用于聚类!")
         
         # 1. 特征标准化
+        print("执行标准化...")
         features_scaled = self.scaler.fit_transform(features)
         
         # 2. PCA降维（可选，用于加速）
@@ -334,26 +607,196 @@ class TokenClusteringAnalyzer:
         print(f"执行K-means聚类，k={self.n_clusters}")
         cluster_labels = self.kmeans.fit_predict(features_scaled)
         
-        # 4. t-SNE降维用于可视化
-        print("执行t-SNE降维...")
-        features_2d = self.tsne.fit_transform(features_scaled)
+        # 4. t-SNE降维用于可视化（转换为CPU进行）
+        if do_tsne:
+            print("执行t-SNE降维...")
+            features_cpu = features_scaled.cpu().numpy()
+            features_2d = self.tsne.fit_transform(features_cpu)
+        else:
+            features_2d = None
         
         # 存储结果
         self.features_2d = features_2d
-        self.cluster_labels = cluster_labels
+        self.cluster_labels = cluster_labels.cpu().numpy()
         self.token_info = token_info
+        self.fitted = True
         
         # 分析聚类结果
-        cluster_analysis = self._analyze_clusters(cluster_labels, token_info)
+        cluster_analysis = self._analyze_clusters(self.cluster_labels, token_info)
         
         return {
             'features_2d': features_2d,
-            'cluster_labels': cluster_labels,
+            'cluster_labels': self.cluster_labels,
             'token_info': token_info,
             'cluster_analysis': cluster_analysis,
             'n_clusters': self.n_clusters,
             'excluded_special_tokens': self.exclude_special_tokens
         }
+    
+    def predict(self, features: Union[torch.Tensor, np.ndarray]) -> torch.Tensor:
+        """
+        对新的特征进行聚类预测（用于训练过程中）
+        
+        Args:
+            features: 新的特征矩阵
+            
+        Returns:
+            聚类标签
+        """
+        if not self.fitted:
+            raise ValueError("Analyzer has not been fitted yet. Call fit_cluster first.")
+        
+        # 转换为GPU张量
+        if not isinstance(features, torch.Tensor):
+            features = torch.tensor(features, device=self.device, dtype=torch.float32)
+        else:
+            features = features.to(self.device).float()
+        
+        # 应用相同的预处理步骤
+        features_scaled = self.scaler.transform(features)
+        
+        if hasattr(self.pca, 'fitted') and self.pca.fitted:
+            features_scaled = self.pca.transform(features_scaled)
+        
+        # 预测聚类
+        cluster_labels = self.kmeans.predict(features_scaled)
+        
+        return cluster_labels
+    
+    def save_state(self, save_path: str):
+        """
+        保存Analyzer的状态
+        
+        Args:
+            save_path: 保存路径（不包含扩展名）
+        """
+        if not self.fitted:
+            print("警告: Analyzer尚未拟合，保存的状态可能不完整")
+        
+        state = {
+            'n_clusters': self.n_clusters,
+            'random_state': self.random_state,
+            'exclude_special_tokens': self.exclude_special_tokens,
+            'device': self.device,
+            'fitted': self.fitted,
+        }
+        
+        # 保存scaler状态
+        if self.scaler.fitted:
+            state['scaler'] = {
+                'mean_': self.scaler.mean_.cpu(),
+                'std_': self.scaler.std_.cpu(),
+                'fitted': True
+            }
+        else:
+            state['scaler'] = {'fitted': False}
+        
+        # 保存PCA状态
+        if self.pca.fitted:
+            state['pca'] = {
+                'components_': self.pca.components_.cpu(),
+                'explained_variance_': self.pca.explained_variance_.cpu(),
+                'mean_': self.pca.mean_.cpu(),
+                'n_components': self.pca.n_components,
+                'fitted': True
+            }
+        else:
+            state['pca'] = {'fitted': False, 'n_components': self.pca.n_components}
+        
+        # 保存KMeans状态
+        if self.kmeans.fitted:
+            state['kmeans'] = {
+                'cluster_centers_': self.kmeans.cluster_centers_.cpu(),
+                'n_clusters': self.kmeans.n_clusters,
+                'inertia_': self.kmeans.inertia_.cpu() if self.kmeans.inertia_ is not None else None,
+                'fitted': True
+            }
+        else:
+            state['kmeans'] = {'fitted': False, 'n_clusters': self.kmeans.n_clusters}
+        
+        # 保存主状态文件
+        main_path = f"{save_path}.pkl"
+        with open(main_path, 'wb') as f:
+            pickle.dump(state, f)
+        
+        # 保存配置文件（人类可读）
+        config_path = f"{save_path}_config.json"
+        config = {
+            'n_clusters': self.n_clusters,
+            'random_state': self.random_state,
+            'exclude_special_tokens': self.exclude_special_tokens,
+            'device': self.device,
+            'fitted': self.fitted,
+            'scaler_fitted': self.scaler.fitted,
+            'pca_fitted': self.pca.fitted,
+            'kmeans_fitted': self.kmeans.fitted,
+        }
+        
+        with open(config_path, 'w') as f:
+            json.dump(config, f, indent=2)
+        
+        print(f"Analyzer状态已保存到: {main_path}")
+        print(f"配置文件已保存到: {config_path}")
+    
+    @classmethod
+    def load_state(cls, load_path: str, device: str = None):
+        """
+        从保存的状态加载Analyzer
+        
+        Args:
+            load_path: 加载路径（不包含扩展名）
+            device: 目标设备，如果为None则使用保存时的设备
+            
+        Returns:
+            加载的TokenClusteringAnalyzer实例
+        """
+        main_path = f"{load_path}.pkl"
+        
+        if not os.path.exists(main_path):
+            raise FileNotFoundError(f"State file not found: {main_path}")
+        
+        with open(main_path, 'rb') as f:
+            state = pickle.load(f)
+        
+        # 使用指定设备或保存时的设备
+        target_device = device or state['device']
+        
+        # 创建新实例
+        analyzer = cls(
+            n_clusters=state['n_clusters'],
+            random_state=state['random_state'],
+            exclude_special_tokens=state['exclude_special_tokens'],
+            device=target_device
+        )
+        
+        # 恢复scaler状态
+        if state['scaler']['fitted']:
+            analyzer.scaler.mean_ = state['scaler']['mean_'].to(target_device)
+            analyzer.scaler.std_ = state['scaler']['std_'].to(target_device)
+            analyzer.scaler.fitted = True
+        
+        # 恢复PCA状态
+        if state['pca']['fitted']:
+            analyzer.pca.components_ = state['pca']['components_'].to(target_device)
+            analyzer.pca.explained_variance_ = state['pca']['explained_variance_'].to(target_device)
+            analyzer.pca.mean_ = state['pca']['mean_'].to(target_device)
+            analyzer.pca.n_components = state['pca']['n_components']
+            analyzer.pca.fitted = True
+        
+        # 恢复KMeans状态
+        if state['kmeans']['fitted']:
+            analyzer.kmeans.cluster_centers_ = state['kmeans']['cluster_centers_'].to(target_device)
+            analyzer.kmeans.n_clusters = state['kmeans']['n_clusters']
+            if state['kmeans']['inertia_'] is not None:
+                analyzer.kmeans.inertia_ = state['kmeans']['inertia_'].to(target_device)
+            analyzer.kmeans.fitted = True
+        
+        analyzer.fitted = state['fitted']
+        
+        print(f"Analyzer状态已从 {main_path} 加载")
+        print(f"目标设备: {target_device}")
+        
+        return analyzer
     
     def _analyze_clusters(self, cluster_labels: np.ndarray, 
                          token_info: List[Dict]) -> Dict:
@@ -390,8 +833,8 @@ class TokenClusteringAnalyzer:
             }
         
         return analysis
-
-
+    
+    # 保留原有的可视化方法...
     def visualize_clusters(self, results: Dict, save_path: str = None, 
                           figsize: Tuple[int, int] = (15, 10)):
         """可视化聚类结果"""
@@ -438,40 +881,46 @@ class TokenClusteringAnalyzer:
         # 4. 聚类大小分布
         ax4 = axes[1, 0]
         cluster_sizes = [results['cluster_analysis'][i]['size'] 
-                        for i in range(self.n_clusters)]
-        ax4.bar(range(self.n_clusters), cluster_sizes)
-        ax4.set_title('distribution of cluster sizes')
+                        for i in range(self.n_clusters) 
+                        if i in results['cluster_analysis']]
+        cluster_ids = [i for i in range(self.n_clusters) 
+                      if i in results['cluster_analysis']]
+        ax4.bar(cluster_ids, cluster_sizes)
+        ax4.set_title('size of each cluster')
         ax4.set_xlabel('cluster ID')
-        ax4.set_ylabel('size (number of tokens)')
+        ax4.set_ylabel('number of tokens')
         
         # 5. Token类型在聚类中的分布
         ax5 = axes[1, 1]
-        type_cluster_matrix = np.zeros((len(unique_types), self.n_clusters))
-        
-        for cluster_id in range(self.n_clusters):
-            type_dist = results['cluster_analysis'][cluster_id]['type_distribution']
-            for i, token_type in enumerate(unique_types):
-                type_cluster_matrix[i, cluster_id] = type_dist.get(token_type, 0)
-        
-        # 归一化
-        type_cluster_matrix = type_cluster_matrix / (type_cluster_matrix.sum(axis=1, keepdims=True) + 1e-8)
-        
-        sns.heatmap(type_cluster_matrix, annot=True, fmt='.2f', 
-                   xticklabels=[f'C{i}' for i in range(self.n_clusters)],
-                   yticklabels=unique_types, ax=ax5, cmap='Blues')
-        ax5.set_title('Token type distribution in clusters')
+        if unique_types and len(results['cluster_analysis']) > 0:
+            type_cluster_matrix = np.zeros((len(unique_types), len(cluster_ids)))
+            
+            for i, cluster_id in enumerate(cluster_ids):
+                type_dist = results['cluster_analysis'][cluster_id]['type_distribution']
+                for j, token_type in enumerate(unique_types):
+                    type_cluster_matrix[j, i] = type_dist.get(token_type, 0)
+            
+            # 归一化
+            row_sums = type_cluster_matrix.sum(axis=1, keepdims=True)
+            type_cluster_matrix = type_cluster_matrix / (row_sums + 1e-8)
+            
+            sns.heatmap(type_cluster_matrix, annot=True, fmt='.2f', 
+                       xticklabels=[f'C{i}' for i in cluster_ids],
+                       yticklabels=unique_types, ax=ax5, cmap='Blues')
+            ax5.set_title('Token type distribution in clusters')
         
         # 6. 位置分布
         ax6 = axes[1, 2]
-        avg_positions = [results['cluster_analysis'][i]['avg_position'] 
-                        for i in range(self.n_clusters)]
-        position_stds = [results['cluster_analysis'][i]['position_std'] 
-                        for i in range(self.n_clusters)]
-        
-        ax6.bar(range(self.n_clusters), avg_positions, yerr=position_stds, capsize=5)
-        ax6.set_title('Average position in clusters')
-        ax6.set_xlabel('Cluster ID')
-        ax6.set_ylabel('Average Position')
+        if len(results['cluster_analysis']) > 0:
+            avg_positions = [results['cluster_analysis'][i]['avg_position'] 
+                            for i in cluster_ids]
+            position_stds = [results['cluster_analysis'][i]['position_std'] 
+                            for i in cluster_ids]
+            
+            ax6.bar(cluster_ids, avg_positions, yerr=position_stds, capsize=5)
+            ax6.set_title('Average position in clusters')
+            ax6.set_xlabel('Cluster ID')
+            ax6.set_ylabel('Average Position')
         
         plt.tight_layout()
         
@@ -482,12 +931,12 @@ class TokenClusteringAnalyzer:
         plt.show()
         
         # 打印详细分析
-        self._print_cluster_analysis(results['cluster_analysis'], self.exclude_special_tokens)
+        self._print_cluster_analysis(results['cluster_analysis'], excluded_special=True)
     
     def _print_cluster_analysis(self, cluster_analysis: Dict, excluded_special: bool):
         """打印聚类分析结果"""
         print("\n" + "="*60)
-        title = "聚类分析详细结果"
+        title = "聚类分析详细结果 (GPU加速)"
         if excluded_special:
             title += " (已排除特殊Token)"
         print(title)
@@ -509,7 +958,6 @@ class TokenClusteringAnalyzer:
             print("  最常见的tokens:")
             for token, count in analysis['top_tokens'][:10]:
                 print(f"    '{token}': {count}次")
-
 
 def quick_test():
     """快速测试聚类功能"""
@@ -563,7 +1011,7 @@ def quick_test():
     print(f"Token数量: {len(token_info_flat)}")
     
     # 执行聚类
-    results = analyzer.fit_cluster(features_flat, token_info_flat)
+    results = analyzer.fit_cluster(features_flat, token_info_flat, do_tsne=True)
     
     # 5. 可视化
     print("生成可视化...")
@@ -587,12 +1035,16 @@ def run_clustering_experiment(args):
     
     # 2. 加载数据
     print(f"\n2. 加载数据集")
-    dataset = GSM8KDataset(block_size=args.block_size)
+    #dataset = GSM8KDataset(block_size=args.block_size)
+    dataset = TextDataset(data_dir="/cpfs/user/fengmingquan/dataset/processed-gpt2/open-web-math",
+                          split="train",
+                          block_size=args.block_size,)
+
     dataloader = DataLoader(
         dataset, 
         batch_size=args.batch_size, 
         shuffle=False,
-        num_workers=2
+        num_workers=args.batch_size
     )
     print(f"数据集大小: {len(dataset)} samples")
     
@@ -630,7 +1082,8 @@ def run_clustering_experiment(args):
             print(f"  单批特征形状: {features_flat.shape}")
     
     # 合并所有特征
-    all_features = np.vstack(all_features)
+    
+    all_features = torch.vstack(all_features)
     print(f"总特征形状: {all_features.shape}")
     print(f"总token数量: {len(all_tokens)}")
     
@@ -641,7 +1094,8 @@ def run_clustering_experiment(args):
     # 为了加速，可以采样部分数据
     if len(all_tokens) > args.max_tokens:
         print(f"采样 {args.max_tokens} 个tokens进行聚类...")
-        indices = np.random.choice(len(all_tokens), args.max_tokens, replace=False)
+        #indices = np.random.choice(len(all_tokens), args.max_tokens, replace=False)
+        indices = torch.randperm(len(all_tokens))[:args.max_tokens]
         sampled_features = all_features[indices]
         sampled_tokens = [all_tokens[i] for i in indices]
     else:
@@ -649,15 +1103,20 @@ def run_clustering_experiment(args):
         sampled_tokens = all_tokens
     
     # 执行聚类
-    results = analyzer.fit_cluster(sampled_features, sampled_tokens)
+    results = analyzer.fit_cluster(sampled_features, sampled_tokens, do_tsne=args.do_tsne)
     
-    # 6. 可视化结果
-    print(f"\n6. 生成可视化结果")
     output_dir = args.output_dir or "clustering_results"
     os.makedirs(output_dir, exist_ok=True)
     
-    viz_path = os.path.join(output_dir, f"token_clustering_k{args.n_clusters}.png")
-    analyzer.visualize_clusters(results, save_path=viz_path)
+    
+    # 6. 可视化结果
+    if args.do_tsne:
+        print(f"\n6. 生成可视化结果")
+        viz_path = os.path.join(output_dir, f"token_clustering_k{args.n_clusters}.png")
+        analyzer.visualize_clusters(results, save_path=viz_path)
+    else:
+        print(f"\n6. 打印聚类分析结果")
+        analyzer._print_cluster_analysis(results['cluster_analysis'], excluded_special=True)
     
     # 7. 保存详细结果
     print(f"\n7. 保存结果")
@@ -686,7 +1145,7 @@ def main():
     # 数据参数
     parser.add_argument('--batch_size', type=int, default=4,
                        help='批次大小')
-    parser.add_argument('--block_size', type=int, default=512,
+    parser.add_argument('--block_size', type=int, default=1024,
                        help='序列长度')  
     parser.add_argument('--max_batches', type=int, default=20,
                        help='最大处理批次数')
@@ -701,9 +1160,12 @@ def main():
     parser.add_argument('--output_dir', type=str, default='clustering_results',
                        help='输出目录')
     
+    parser.add_argument('--do_tsne', action='store_true',
+                       help='是否执行t-SNE降维可视化(默认不做)')    
     args = parser.parse_args()
     
     run_clustering_experiment(args)
 
 if __name__ == '__main__':
-    main()
+    main() #python token_cluster.py --model_path "gpt2-xl" --n_clusters 16 --batch_size 8 --max_batches 10 --max_tokens 100000
+    #quick_test()  # 运行快速测试
