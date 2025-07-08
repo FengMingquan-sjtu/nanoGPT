@@ -836,50 +836,20 @@ class TokenClusteringAnalyzer:
     
     # 保留原有的可视化方法...
     def visualize_clusters(self, results: Dict, save_path: str = None, 
-                          figsize: Tuple[int, int] = (15, 10)):
+                          figsize: Tuple[int, int] = (15, 5)):
         """可视化聚类结果"""
         features_2d = results['features_2d']
         cluster_labels = results['cluster_labels']
         token_info = results['token_info']
         
         # 创建图形
-        fig, axes = plt.subplots(2, 3, figsize=figsize)
+        fig, axes = plt.subplots(1, 3, figsize=figsize)
         fig.suptitle('GPT Token feature cluster analysis', fontsize=16)
         
-        # 1. 按聚类标签着色
-        ax1 = axes[0, 0]
-        scatter = ax1.scatter(features_2d[:, 0], features_2d[:, 1], 
-                            c=cluster_labels, cmap='tab10', alpha=0.6, s=10)
-        ax1.set_title('cluster labels')
-        ax1.set_xlabel('t-SNE Dimension 1')
-        ax1.set_ylabel('t-SNE Dimension 2')
-        plt.colorbar(scatter, ax=ax1)
+
         
-        # 2. 按token类型着色
-        ax2 = axes[0, 1]
-        token_types = [token['type'] for token in token_info]
-        unique_types = list(set(token_types))
-        type_colors = {t: i for i, t in enumerate(unique_types)}
-        colors = [type_colors[t] for t in token_types]
-        
-        scatter2 = ax2.scatter(features_2d[:, 0], features_2d[:, 1], 
-                             c=colors, cmap='Set3', alpha=0.6, s=10)
-        ax2.set_title('color by token type')
-        ax2.set_xlabel('t-SNE Dimension 1')
-        ax2.set_ylabel('t-SNE Dimension 2')
-        
-        # 3. 按位置着色
-        ax3 = axes[0, 2]
-        positions = [token['position'] for token in token_info]
-        scatter3 = ax3.scatter(features_2d[:, 0], features_2d[:, 1], 
-                             c=positions, cmap='viridis', alpha=0.6, s=10)
-        ax3.set_title('color by position')
-        ax3.set_xlabel('t-SNE Dimension 1')
-        ax3.set_ylabel('t-SNE Dimension 2')
-        plt.colorbar(scatter3, ax=ax3)
-        
-        # 4. 聚类大小分布
-        ax4 = axes[1, 0]
+        # 聚类大小分布
+        ax4 = axes[0]
         cluster_sizes = [results['cluster_analysis'][i]['size'] 
                         for i in range(self.n_clusters) 
                         if i in results['cluster_analysis']]
@@ -890,8 +860,11 @@ class TokenClusteringAnalyzer:
         ax4.set_xlabel('cluster ID')
         ax4.set_ylabel('number of tokens')
         
-        # 5. Token类型在聚类中的分布
-        ax5 = axes[1, 1]
+
+        # Token类型在聚类中的分布
+        ax5 = axes[1]
+        token_types = [token['type'] for token in token_info]
+        unique_types = list(set(token_types))
         if unique_types and len(results['cluster_analysis']) > 0:
             type_cluster_matrix = np.zeros((len(unique_types), len(cluster_ids)))
             
@@ -909,8 +882,8 @@ class TokenClusteringAnalyzer:
                        yticklabels=unique_types, ax=ax5, cmap='Blues')
             ax5.set_title('Token type distribution in clusters')
         
-        # 6. 位置分布
-        ax6 = axes[1, 2]
+        # 位置分布
+        ax6 = axes[2]
         if len(results['cluster_analysis']) > 0:
             avg_positions = [results['cluster_analysis'][i]['avg_position'] 
                             for i in cluster_ids]
@@ -1086,13 +1059,16 @@ def run_clustering_experiment(args):
     all_features = torch.vstack(all_features)
     print(f"总特征形状: {all_features.shape}")
     print(f"总token数量: {len(all_tokens)}")
+
+    # 释放模型占用的GPU内存
+    del model
     
     # 5. 执行聚类分析
     print(f"\n5. 执行聚类分析 (k={args.n_clusters})")
     analyzer = TokenClusteringAnalyzer(n_clusters=args.n_clusters)
     
     # 为了加速，可以采样部分数据
-    if len(all_tokens) > args.max_tokens:
+    if args.max_tokens>0 and len(all_tokens) > args.max_tokens:
         print(f"采样 {args.max_tokens} 个tokens进行聚类...")
         #indices = np.random.choice(len(all_tokens), args.max_tokens, replace=False)
         indices = torch.randperm(len(all_tokens))[:args.max_tokens]
@@ -1110,13 +1086,9 @@ def run_clustering_experiment(args):
     
     
     # 6. 可视化结果
-    if args.do_tsne:
-        print(f"\n6. 生成可视化结果")
-        viz_path = os.path.join(output_dir, f"token_clustering_k{args.n_clusters}.png")
-        analyzer.visualize_clusters(results, save_path=viz_path)
-    else:
-        print(f"\n6. 打印聚类分析结果")
-        analyzer._print_cluster_analysis(results['cluster_analysis'], excluded_special=True)
+    viz_path = os.path.join(output_dir, f"token_clustering_k{args.n_clusters}.png")
+    analyzer.visualize_clusters(results, save_path=viz_path)
+
     
     # 7. 保存详细结果
     print(f"\n7. 保存结果")
@@ -1126,6 +1098,10 @@ def run_clustering_experiment(args):
         pickle.dump(results, f)
     print(f"详细结果已保存到: {results_path}")
     
+    # 8. 保存分析器状态
+    analyzer_path = os.path.join(output_dir, f"token_clustering_analyzer_k{args.n_clusters}")
+    analyzer.save_state(analyzer_path)
+
     # 清理
     feature_extractor.cleanup()
     
@@ -1168,4 +1144,5 @@ def main():
 
 if __name__ == '__main__':
     main() #python token_cluster.py --model_path "gpt2-xl" --n_clusters 16 --batch_size 8 --max_batches 10 --max_tokens 100000
+    # python token_cluster.py --model_path out/cont-gpt2-1.5B-owm-15B/2025-07-02_21-50-52/ --ckpt_step 30000 --n_clusters 20 --batch_size 40 --max_batches 5 --max_tokens 200000
     #quick_test()  # 运行快速测试

@@ -1,0 +1,10 @@
+{
+  "n_clusters": 20,
+  "random_state": 42,
+  "exclude_special_tokens": true,
+  "device": "cuda",
+  "fitted": true,
+  "scaler_fitted": true,
+  "pca_fitted": true,
+  "kmeans_fitted": true
+}
