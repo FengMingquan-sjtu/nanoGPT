@@ -88,7 +88,10 @@ class GPTFeatureExtractor:
         
         # 默认提取最后几层的特征
         if layers_to_extract is None:
-            n_layers = len(model.transformer.h)
+            if hasattr(self.model, 'module'):
+                n_layers = len(self.model.module.transformer.h)
+            else:
+                n_layers = len(model.transformer.h)
             layers_to_extract = [n_layers-3, n_layers-2, n_layers-1]  # 最后3层
         
         self.layers_to_extract = layers_to_extract
@@ -129,10 +132,17 @@ class GPTFeatureExtractor:
             return hook
         
         # 为指定层注册hook
+        model_to_hook = self.model
+        if hasattr(self.model, 'module'):  # 检查是否是DDP包装的模型
+            model_to_hook = self.model.module
+            
+
+        # 为指定层注册hook
         for layer_idx in self.layers_to_extract:
-            layer = self.model.transformer.h[layer_idx]
+            layer = model_to_hook.transformer.h[layer_idx]
             hook = layer.register_forward_hook(get_features(f'layer_{layer_idx}'))
             self.hooks.append(hook)
+
     
     def _is_special_token(self, token_id: int, token_text: str) -> bool:
         """判断是否为特殊token"""
@@ -161,28 +171,30 @@ class GPTFeatureExtractor:
         return False
     
     def extract_features(self, input_ids: torch.Tensor, 
-                        return_tokens: bool = True) -> Dict:
+                        return_tokens: bool = True, do_forward: bool = True) -> Dict:
         """
         提取输入token的深度特征
         
         Args:
             input_ids: 输入token序列 (batch_size, seq_len)
             return_tokens: 是否返回对应的token信息
+            do_forward: 是否在函数内做执行前向传播以提取特征
             
         Returns:
             包含特征和token信息的字典
         """
-        self.features = {}  # 清空之前的特征
-        
-        with torch.no_grad():
-            # 前向传播，触发hook提取特征
-            input_ids = input_ids.to(self.device)
-            _ = self.model(input_ids)
+        if do_forward:
+            self.features = {}  # 清空之前的特征
+            
+            with torch.no_grad():
+                # 前向传播，触发hook提取特征
+                input_ids = input_ids.to(self.device)
+                _ = self.model(input_ids)
         
         # 整理提取的特征
         result = {
             'features': {},
-            'input_ids': input_ids.cpu(),
+            'input_ids': input_ids,
             'special_token_mask': None,  # 用于标记特殊token位置
         }
         
@@ -750,7 +762,7 @@ class TokenClusteringAnalyzer:
         Returns:
             加载的TokenClusteringAnalyzer实例
         """
-        main_path = f"{load_path}.pkl"
+        main_path = f"{load_path}.pkl" if not load_path.endswith('.pkl') else load_path
         
         if not os.path.exists(main_path):
             raise FileNotFoundError(f"State file not found: {main_path}")

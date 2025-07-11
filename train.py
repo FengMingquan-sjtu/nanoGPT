@@ -28,7 +28,8 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
 from model import GPTConfig, GPT
-from model import get_loss_rho, token_select_rho
+from model import get_loss_rho, get_loss_cls_rho
+from token_cluster import TokenClusteringAnalyzer, GPTFeatureExtractor
 
 os.environ["WANDB_API_KEY"] = "b7f26328382adc825eb193aac3f30f07e7da99c1" # set your wandb api key here
 # -----------------------------------------------------------------------------
@@ -45,6 +46,7 @@ eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
 ref_model_ckpt = None # reference model file, used for data selection
+clustering_ckpt = None # token clustering results, used for cluster data selection
 # wandb logging
 wandb_log = False # disabled by default
 wandb_project = 'owt'
@@ -226,14 +228,19 @@ if init_from == 'resume':
     optimizer.load_state_dict(checkpoint['optimizer'])
 checkpoint = None # free up memory
 
+
 # compile the model
 if compile:
     print("compiling the model... (takes a ~minute)")
     unoptimized_model = model
     model = torch.compile(model) # requires PyTorch 2.0
     if ref_model is not None:
-        # compile the reference model as well, if it exists
-        ref_model = torch.compile(ref_model)
+        if clustering_ckpt is None:
+            # compile the reference model as well, if it exists. 
+            ref_model = torch.compile(ref_model)
+        else:
+            #BUG: compile does not work with hooks yet, so we cannot compile the reference model if we use clustering
+            print("WARNING: clustering_ckpt is set, but reference model is not compiled, because hooks are not supported in compiled models yet.")
 
 # wrap model into DDP container
 if ddp:
@@ -241,6 +248,14 @@ if ddp:
     if ref_model is not None:
         # wrap the reference model into DDP container as well, if it exists
         ref_model = DDP(ref_model, device_ids=[ddp_local_rank])
+
+# load token clustering results, used for cluster data selection
+# cluster analyzer
+cluster_analyzer = None
+feature_extractor = None
+if clustering_ckpt is not None and ref_model is not None:
+    cluster_analyzer = TokenClusteringAnalyzer.load_state(clustering_ckpt) # load scalar+pca+kmeans cluster model.
+    feature_extractor = GPTFeatureExtractor(ref_model)  #register forward hook on ref_model
 
 # helps estimate an arbitrarily accurate loss over either split using many batches
 @torch.no_grad()
@@ -328,7 +343,10 @@ while True:
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
             logits, _ = model(X, Y)
-            loss = get_loss_rho(logits, Y, ref_model, X, token_keep_ratio)
+            if clustering_ckpt is None:
+                loss = get_loss_rho(logits, Y, ref_model, X, token_keep_ratio)
+            else:
+                loss = get_loss_cls_rho(logits, Y, ref_model, X, token_keep_ratio, cluster_analyzer, feature_extractor)
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = get_batch('train')
