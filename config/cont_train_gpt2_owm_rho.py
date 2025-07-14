@@ -29,7 +29,7 @@
 token_keep_ratio = 0.5 
 
 #I/O
-init_from = 'gpt2-large' # load openai pretrained gpt2 model
+init_from = 'gpt2-xl' # load openai pretrained gpt2 model
 out_dir = 'out/cont-gpt2-0.7B-owm-15B' # output directory for checkpoints and logs
 ref_model_ckpt = "out/cont-gpt2-1.5B-owm-15B/2025-07-02_21-50-52/ckpt-30000.pt"
 #clustering_ckpt = "clustering_results/token_clustering_analyzer_k20.pkl"
@@ -43,9 +43,9 @@ dataset = '/cpfs/user/fengmingquan/dataset/processed-gpt2/open-web-math' # path 
 
 # these make the total batch size be ~0.5M
 # 12 batch size * 1024 block size * 5 gradaccum * 8 GPUs = 491,520
-batch_size =  2   # 3 for 1.5B, 4 for 0.7B
+batch_size =  3   # 3 for 1.5B, 4 for 0.7B
 block_size = 1024
-gradient_accumulation_steps = 8 * 5 * 6
+gradient_accumulation_steps = 8 * 5 * 4
 
 # optimizer and lr
 # token per iter = 491,520

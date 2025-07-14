@@ -45,8 +45,10 @@ eval_iters = 200
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
-ref_model_ckpt = None # reference model file, used for data selection
-clustering_ckpt = None # token clustering results, used for cluster data selection
+# token selection
+ref_model_ckpt = "" # reference model file, used for data selection
+clustering_ckpt = "" # token clustering results, used for cluster data selection
+reverse_select = False # if True, select tokens in reverse order.
 # wandb logging
 wandb_log = False # disabled by default
 wandb_project = 'owt'
@@ -206,16 +208,21 @@ model.to(device)
 
 # load reference model checkpoint, used for data selection
 ref_model = None
-if ref_model_ckpt is not None:
+if len(ref_model_ckpt)>0:
     print(f"Loading reference model from {ref_model_ckpt}")
-    # resume training from a checkpoint.
-    ref_checkpoint = torch.load(ref_model_ckpt, map_location=device)
-    ref_model_args = ref_checkpoint['model_args']
-    # create the model
-    ref_gptconf = GPTConfig(**ref_model_args)
-    ref_model = GPT(ref_gptconf)
-    ref_state_dict = ref_checkpoint['model']
-    ref_model.load_ckp_state_dict(ref_state_dict)
+    if ref_model_ckpt.endswith('.pkl'):
+        # resume training from a checkpoint.
+        ref_checkpoint = torch.load(ref_model_ckpt, map_location=device)
+        ref_model_args = ref_checkpoint['model_args']
+        # create the model
+        ref_gptconf = GPTConfig(**ref_model_args)
+        ref_model = GPT(ref_gptconf)
+        ref_state_dict = ref_checkpoint['model']
+        ref_model.load_ckp_state_dict(ref_state_dict)
+    else:
+        # load from a pretrained model
+        override_args = dict(dropout=dropout)
+        ref_model = GPT.from_pretrained(ref_model_ckpt, override_args)
     ref_model.to(device)
     ref_model.eval()
 
@@ -235,7 +242,7 @@ if compile:
     unoptimized_model = model
     model = torch.compile(model) # requires PyTorch 2.0
     if ref_model is not None:
-        if clustering_ckpt is None:
+        if len(clustering_ckpt)==0:
             # compile the reference model as well, if it exists. 
             ref_model = torch.compile(ref_model)
         else:
@@ -253,7 +260,7 @@ if ddp:
 # cluster analyzer
 cluster_analyzer = None
 feature_extractor = None
-if clustering_ckpt is not None and ref_model is not None:
+if len(clustering_ckpt)>0 and ref_model is not None:
     cluster_analyzer = TokenClusteringAnalyzer.load_state(clustering_ckpt) # load scalar+pca+kmeans cluster model.
     feature_extractor = GPTFeatureExtractor(ref_model)  #register forward hook on ref_model
 
@@ -343,10 +350,10 @@ while True:
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
             logits, _ = model(X, Y)
-            if clustering_ckpt is None:
-                loss = get_loss_rho(logits, Y, ref_model, X, token_keep_ratio)
+            if len(clustering_ckpt)==0:
+                loss = get_loss_rho(logits, Y, ref_model, X, token_keep_ratio, reverse_select)
             else:
-                loss = get_loss_cls_rho(logits, Y, ref_model, X, token_keep_ratio, cluster_analyzer, feature_extractor)
+                loss = get_loss_cls_rho(logits, Y, ref_model, X, token_keep_ratio, cluster_analyzer, feature_extractor, reverse_select)
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = get_batch('train')

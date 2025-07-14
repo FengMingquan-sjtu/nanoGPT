@@ -360,7 +360,7 @@ class GPT(nn.Module):
 
         return idx
 
-def token_sort_rho(logits, targets, ref_model, idx):
+def token_sort_rho(logits, targets, ref_model, idx, reverse_select):
     ignore_idx = -1 # the index of the token to ignore in the targets
     b, t, vocab_size = logits.size()
     #logits shape (b, t, vocab_size), targets shape (b, t), token_loss shape (b*t)
@@ -374,12 +374,12 @@ def token_sort_rho(logits, targets, ref_model, idx):
         #diff_token_loss = diff_token_loss.masked_fill(ignore_mask, -1e8) # ignore the -1 targets
         diff_token_loss = diff_token_loss.view(b, -1) # reshape to (b, t)
         #sorted_token_indices = torch.topk(diff_token_loss, k=t, dim=1).indices #shape (b, n_tokens)
-        sorted_diff_loss = torch.sort(diff_token_loss, descending=True, dim=1)
+        sorted_diff_loss = torch.sort(diff_token_loss, descending=not reverse_select, dim=1)
         sorted_token_indices = sorted_diff_loss.indices #shape (b, t)
         return sorted_token_indices, diff_token_loss
 
 
-def get_loss_rho(logits, targets, ref_model=None, idx=None, ratio=0.5):
+def get_loss_rho(logits, targets, ref_model=None, idx=None, ratio=0.5, reverse_select=False):
     """
     Calculate the loss given the logits and targets.
     If ref_model is provided, use it to calculate the reference logits for KL divergence.
@@ -390,9 +390,10 @@ def get_loss_rho(logits, targets, ref_model=None, idx=None, ratio=0.5):
         #logits shape (b, t, vocab_size), targets shape (b, t), token_loss shape (b*t)
         token_loss = F.cross_entropy(logits.view(-1, vocab_size), targets.view(-1), ignore_index=ignore_idx, reduction='none')
         
-        sorted_token_indices, _ = token_sort_rho(logits, targets, ref_model, idx)
+        sorted_token_indices, _ = token_sort_rho(logits, targets, ref_model, idx, reverse_select)
         # gather the average loss for the top-k tokens
         ignore_mask = (targets.view(-1) == ignore_idx) # shape (b*t,)
+        
         loss = token_loss.masked_fill(ignore_mask, 0.0)  #shape (b*t,)
         loss = loss.reshape(b, -1) # shape (b, t) 
         loss = loss.gather(1, sorted_token_indices) # shape (b, t)
@@ -418,7 +419,7 @@ def get_loss_rho(logits, targets, ref_model=None, idx=None, ratio=0.5):
     return loss
 
 
-def get_loss_cls_rho(logits, targets, ref_model, idx, ratio, cluster_analyzer, feature_extractor):
+def get_loss_cls_rho(logits, targets, ref_model, idx, ratio, cluster_analyzer, feature_extractor, reverse_select):
     # --- cluster analysis ---
     with torch.no_grad():
         #clean feature cache before extracting features
@@ -472,7 +473,7 @@ def get_loss_cls_rho(logits, targets, ref_model, idx, ratio, cluster_analyzer, f
             cluster_cnt = torch.bincount(token_clusters[i], minlength=cluster_analyzer.n_clusters)
             diff_cluster_loss = diff_cluster_loss / cluster_cnt.clamp(min=1)  # avoid division by zero
             # sort the clusters by the average diff_token_loss
-            sorted_cluster_indices = torch.argsort(diff_cluster_loss, descending=False)  # shape (n_clusters,) # NOTE: iterate over the clusters in descending order of average diff_token_loss
+            sorted_cluster_indices = torch.argsort(diff_cluster_loss, descending=not reverse_select)  # shape (n_clusters,) 
             n_tokens = int(ratio * t)  # number of tokens to select
             n_tokens_accum = 0
             for j in sorted_cluster_indices:  
@@ -487,7 +488,10 @@ def get_loss_cls_rho(logits, targets, ref_model, idx, ratio, cluster_analyzer, f
                 if n_tokens_i_j > 0:
                     # get the loss for the selected tokens in the cluster
                     loss_i_j = loss[i][mask_j] # shape (n_tokens_i_j,)
-                    loss_i_j = loss_i_j[-n_tokens_i_j:] # NOTE: selection inversed.
+                    if reverse_select:
+                        loss_i_j = loss_i_j[-n_tokens_i_j:] # NOTE: selection inversed.
+                    else:
+                        loss_i_j = loss_i_j[:n_tokens_i_j]
                     loss_accum += loss_i_j.sum()
                     n_tokens_accum += n_tokens_i_j
 
