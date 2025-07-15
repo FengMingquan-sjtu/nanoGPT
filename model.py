@@ -316,6 +316,28 @@ class GPT(nn.Module):
         print(f"using fused AdamW: {use_fused}")
 
         return optimizer
+    
+    def configure_muon_optimizer(self, weight_decay, learning_rate, betas, device_type):
+        hidden_matrix_params = [p for n, p in self.transformer.h.named_parameters() if p.ndim >= 2 and "embed" not in n]
+        embed_params = [p for n, p in self.named_parameters() if "embed" in n]
+        scalar_params = [p for p in self.parameters() if p.ndim < 2]
+        head_params = [self.lm_head.weight]
+
+        # init the optimizer(s)
+        # small adam epsilon by @YouJiacheng. this is an alternate method of fixing the world_size dependence
+        # discovered by @fernbear.bsky.social https://x.com/hi_tysam/status/1879692937589875094
+        from muon import MuonWithAuxAdam
+        adam_groups = [dict(params=head_params, lr=learning_rate), dict(params=embed_params, lr=learning_rate), dict(params=scalar_params, lr=learning_rate)]
+        adam_groups = [dict(**g, betas=betas, eps=1e-10, use_muon=False) for g in adam_groups]
+        muon_group = dict(params=hidden_matrix_params, lr=learning_rate, momentum=0.95, use_muon=True)
+        param_groups = [*adam_groups, muon_group]
+        optimizer = MuonWithAuxAdam(param_groups)
+        for group in optimizer.param_groups:
+            group["initial_lr"] = group["lr"]
+        print(f"Muon optimizer configured with {len(hidden_matrix_params)} hidden matrix parameters, "
+                f"{len(embed_params)} embedding parameters, {len(scalar_params)} scalar parameters, "
+                f"{len(head_params)} head parameters, and {len(optimizer.param_groups)} total parameter groups.")
+        return optimizer
 
     def estimate_mfu(self, fwdbwd_per_iter, dt):
         """ estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS """
@@ -360,7 +382,7 @@ class GPT(nn.Module):
 
         return idx
 
-def token_sort_rho(logits, targets, ref_model, idx, reverse_select):
+def token_sort_rho(logits, targets, ref_model, idx, reverse_select, batch_select=False):
     ignore_idx = -1 # the index of the token to ignore in the targets
     b, t, vocab_size = logits.size()
     #logits shape (b, t, vocab_size), targets shape (b, t), token_loss shape (b*t)
@@ -372,14 +394,19 @@ def token_sort_rho(logits, targets, ref_model, idx, reverse_select):
         diff_token_loss = token_loss - ref_token_loss
         #ignore_mask = (targets.view(-1) == ignore_idx)
         #diff_token_loss = diff_token_loss.masked_fill(ignore_mask, -1e8) # ignore the -1 targets
-        diff_token_loss = diff_token_loss.view(b, -1) # reshape to (b, t)
+        
         #sorted_token_indices = torch.topk(diff_token_loss, k=t, dim=1).indices #shape (b, n_tokens)
-        sorted_diff_loss = torch.sort(diff_token_loss, descending=not reverse_select, dim=1)
-        sorted_token_indices = sorted_diff_loss.indices #shape (b, t)
+        if batch_select:
+            sorted_diff_loss = torch.sort(diff_token_loss, descending=not reverse_select) # shape (b*t,)
+            sorted_token_indices = sorted_diff_loss.indices # shape (b*t)
+        else:
+            diff_token_loss = diff_token_loss.view(b, -1) # reshape to (b, t)
+            sorted_diff_loss = torch.sort(diff_token_loss, descending=not reverse_select, dim=1)
+            sorted_token_indices = sorted_diff_loss.indices #shape (b, t)
         return sorted_token_indices, diff_token_loss
 
 
-def get_loss_rho(logits, targets, ref_model=None, idx=None, ratio=0.5, reverse_select=False):
+def get_loss_rho(logits, targets, ref_model=None, idx=None, ratio=0.5, reverse_select=False, batch_select=False):
     """
     Calculate the loss given the logits and targets.
     If ref_model is provided, use it to calculate the reference logits for KL divergence.
@@ -390,28 +417,38 @@ def get_loss_rho(logits, targets, ref_model=None, idx=None, ratio=0.5, reverse_s
         #logits shape (b, t, vocab_size), targets shape (b, t), token_loss shape (b*t)
         token_loss = F.cross_entropy(logits.view(-1, vocab_size), targets.view(-1), ignore_index=ignore_idx, reduction='none')
         
-        sorted_token_indices, _ = token_sort_rho(logits, targets, ref_model, idx, reverse_select)
+        sorted_token_indices, _ = token_sort_rho(logits, targets, ref_model, idx, reverse_select, batch_select)
         # gather the average loss for the top-k tokens
         ignore_mask = (targets.view(-1) == ignore_idx) # shape (b*t,)
-        
         loss = token_loss.masked_fill(ignore_mask, 0.0)  #shape (b*t,)
-        loss = loss.reshape(b, -1) # shape (b, t) 
-        loss = loss.gather(1, sorted_token_indices) # shape (b, t)
-        #loss = loss.mean() # BUG: each sample in the batch may have different number of tokens, so we cannot average over the batch
-        # instead, we will average over the selected tokens, as below:
-        loss_accum = 0.0
-        n_tokens_accum = 0 
-        for i in range(b):
-            n_ignore = ignore_mask[i].sum().item() # number of ignored tokens in the sample
-            n_tokens = t - n_ignore # number of valid tokens in the sample
+
+        if batch_select:
+            n_ignore = ignore_mask.sum().item() # number of ignored tokens in the batch
+            n_tokens = t*b - n_ignore # number of valid tokens in the batch
             n_tokens = int(ratio * n_tokens) # number of tokens to select
             if n_tokens > 0:
-                loss_accum += loss[i][:n_tokens].sum() # sum the loss for the selected tokens, assume loss is sorted by diff_loss descendingly
-                n_tokens_accum += n_tokens
-        if n_tokens_accum == 0:
-            loss = torch.tensor(0.0, device=logits.device)
+                loss = loss.gather(0, sorted_token_indices[:n_tokens]) # shape (b, n_tokens)
+                loss = loss.mean() # average over the selected tokens
+
+
         else:
-            loss = loss_accum / n_tokens_accum # average over the selected tokens
+            loss = loss.reshape(b, -1) # shape (b, t) 
+            loss = loss.gather(1, sorted_token_indices) # shape (b, t)
+            #loss = loss.mean() # BUG: each sample in the batch may have different number of tokens, so we cannot average over the batch
+            # instead, we will average over the selected tokens, as below:
+            loss_accum = 0.0
+            n_tokens_accum = 0 
+            for i in range(b):
+                n_ignore = ignore_mask[i].sum().item() # number of ignored tokens in the sample
+                n_tokens = t - n_ignore # number of valid tokens in the sample
+                n_tokens = int(ratio * n_tokens) # number of tokens to select
+                if n_tokens > 0:
+                    loss_accum += loss[i][:n_tokens].sum() # sum the loss for the selected tokens, assume loss is sorted by diff_loss descendingly
+                    n_tokens_accum += n_tokens
+            if n_tokens_accum == 0:
+                loss = torch.tensor(0.0, device=logits.device)
+            else:
+                loss = loss_accum / n_tokens_accum # average over the selected tokens
     else:
         # standard cross-entropy loss
         # reshape logits and targets to be of shape (b*t, vocab_size) and (b*t,)

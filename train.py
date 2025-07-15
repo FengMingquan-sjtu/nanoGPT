@@ -49,6 +49,7 @@ init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
 ref_model_ckpt = "" # reference model file, used for data selection
 clustering_ckpt = "" # token clustering results, used for cluster data selection
 reverse_select = False # if True, select tokens in reverse order.
+batch_select = False # if True, select tokens in batches, otherwise select tokens in sample.
 # wandb logging
 wandb_log = False # disabled by default
 wandb_project = 'owt'
@@ -65,6 +66,7 @@ n_embd = 768
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 # adamw optimizer
+use_muon=False
 learning_rate = 6e-4 # max learning rate
 max_iters = 600000 # total number of training iterations
 weight_decay = 1e-1
@@ -210,7 +212,7 @@ model.to(device)
 ref_model = None
 if len(ref_model_ckpt)>0:
     print(f"Loading reference model from {ref_model_ckpt}")
-    if ref_model_ckpt.endswith('.pkl'):
+    if ref_model_ckpt.endswith('.pt'):
         # resume training from a checkpoint.
         ref_checkpoint = torch.load(ref_model_ckpt, map_location=device)
         ref_model_args = ref_checkpoint['model_args']
@@ -230,7 +232,11 @@ if len(ref_model_ckpt)>0:
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 
 # optimizer
-optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
+if not use_muon:
+    optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
+else:
+    print("Using Muon optimizer")
+    optimizer = model.configure_muon_optimizer(weight_decay, learning_rate, (beta1, beta2), device_type)
 if init_from == 'resume':
     optimizer.load_state_dict(checkpoint['optimizer'])
 checkpoint = None # free up memory
@@ -311,7 +317,10 @@ while True:
     lr = get_lr(iter_num) if decay_lr else learning_rate
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
-
+    for group in optimizer.param_groups:
+        if group["use_muon"]:
+            frac = min(iter_num / 300, 1) # momentum warmup for muon
+            group["momentum"] = (1 - frac) * 0.85 + frac * 0.95
     # evaluate the loss on train/val sets and write checkpoints
     if iter_num % eval_interval == 0 and master_process:
         losses = estimate_loss()
@@ -351,7 +360,7 @@ while True:
         with ctx:
             logits, _ = model(X, Y)
             if len(clustering_ckpt)==0:
-                loss = get_loss_rho(logits, Y, ref_model, X, token_keep_ratio, reverse_select)
+                loss = get_loss_rho(logits, Y, ref_model, X, token_keep_ratio, reverse_select, batch_select)
             else:
                 loss = get_loss_cls_rho(logits, Y, ref_model, X, token_keep_ratio, cluster_analyzer, feature_extractor, reverse_select)
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
