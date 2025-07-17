@@ -47,9 +47,13 @@ always_save_checkpoint = True # if True, always save a checkpoint after each eva
 init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
 # token selection
 ref_model_ckpt = "" # reference model file, used for data selection
+ref_model_ckpt_2 = "" # second reference model file, used for data selection
 clustering_ckpt = "" # token clustering results, used for cluster data selection
 reverse_select = False # if True, select tokens in reverse order.
+scale_select = False # if True, select tokens by relative scale of loss instead of difference.
 batch_select = False # if True, select tokens in batches, otherwise select tokens in sample.
+mask_select = 0 # if > 0, use attention mask to select tokens, otherwise use no mask.
+value_select = False # if True, use the value of the loss instead of the difference from the reference model.
 # wandb logging
 wandb_log = False # disabled by default
 wandb_project = 'owt'
@@ -210,7 +214,7 @@ model.to(device)
 
 # load reference model checkpoint, used for data selection
 ref_model = None
-if len(ref_model_ckpt)>0:
+if len(ref_model_ckpt)>0 and mask_select==0:
     print(f"Loading reference model from {ref_model_ckpt}")
     if ref_model_ckpt.endswith('.pt'):
         # resume training from a checkpoint.
@@ -227,6 +231,25 @@ if len(ref_model_ckpt)>0:
         ref_model = GPT.from_pretrained(ref_model_ckpt, override_args)
     ref_model.to(device)
     ref_model.eval()
+
+ref_model_2 = None
+if len(ref_model_ckpt_2)>0:
+    print(f"Loading second reference model from {ref_model_ckpt_2}")
+    if ref_model_ckpt_2.endswith('.pt'):
+        # resume training from a checkpoint.
+        ref_checkpoint_2 = torch.load(ref_model_ckpt_2, map_location=device)
+        ref_model_args_2 = ref_checkpoint_2['model_args']
+        # create the model
+        ref_gptconf_2 = GPTConfig(**ref_model_args_2)
+        ref_model_2 = GPT(ref_gptconf_2)
+        ref_state_dict_2 = ref_checkpoint_2['model']
+        ref_model_2.load_ckp_state_dict(ref_state_dict_2)
+    else:
+        # load from a pretrained model
+        override_args_2 = dict(dropout=dropout)
+        ref_model_2 = GPT.from_pretrained(ref_model_ckpt_2, override_args_2)
+    ref_model_2.to(device)
+    ref_model_2.eval()
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
@@ -254,6 +277,8 @@ if compile:
         else:
             #BUG: compile does not work with hooks yet, so we cannot compile the reference model if we use clustering
             print("WARNING: clustering_ckpt is set, but reference model is not compiled, because hooks are not supported in compiled models yet.")
+    if ref_model_2 is not None:
+        ref_model_2 = torch.compile(ref_model_2)
 
 # wrap model into DDP container
 if ddp:
@@ -261,6 +286,12 @@ if ddp:
     if ref_model is not None:
         # wrap the reference model into DDP container as well, if it exists
         ref_model = DDP(ref_model, device_ids=[ddp_local_rank])
+    if ref_model_2 is not None:
+        # wrap the second reference model into DDP container as well, if it exists
+        ref_model_2 = DDP(ref_model_2, device_ids=[ddp_local_rank])
+
+if mask_select != 0:
+    ref_model = model
 
 # load token clustering results, used for cluster data selection
 # cluster analyzer
@@ -317,10 +348,9 @@ while True:
     lr = get_lr(iter_num) if decay_lr else learning_rate
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
-    for group in optimizer.param_groups:
-        if group["use_muon"]:
+        if use_muon and param_group["use_muon"]:
             frac = min(iter_num / 300, 1) # momentum warmup for muon
-            group["momentum"] = (1 - frac) * 0.85 + frac * 0.95
+            param_group["momentum"] = (1 - frac) * 0.85 + frac * 0.95
     # evaluate the loss on train/val sets and write checkpoints
     if iter_num % eval_interval == 0 and master_process:
         losses = estimate_loss()
@@ -358,9 +388,10 @@ while True:
             # looking at the source of that context manager, it just toggles this variable
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
+            model.train() 
             logits, _ = model(X, Y)
             if len(clustering_ckpt)==0:
-                loss = get_loss_rho(logits, Y, ref_model, X, token_keep_ratio, reverse_select, batch_select)
+                loss = get_loss_rho(logits, Y, ref_model, X, token_keep_ratio, reverse_select, batch_select, scale_select, mask_select, value_select, ref_model_2)
             else:
                 loss = get_loss_cls_rho(logits, Y, ref_model, X, token_keep_ratio, cluster_analyzer, feature_extractor, reverse_select)
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation

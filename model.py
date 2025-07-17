@@ -49,7 +49,7 @@ class CausalSelfAttention(nn.Module):
             self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
                                         .view(1, 1, config.block_size, config.block_size))
 
-    def forward(self, x):
+    def forward(self, x, attn_mask=None):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
@@ -61,11 +61,12 @@ class CausalSelfAttention(nn.Module):
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
             # efficient attention using Flash Attention CUDA kernels
-            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=self.dropout if self.training else 0, is_causal=(attn_mask is None))
         else:
             # manual implementation of attention
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+            mask = self.bias if attn_mask is None else attn_mask
+            att = att.masked_fill(mask[:,:,:T,:T] == 0, float('-inf'))
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)
             y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
@@ -100,8 +101,8 @@ class Block(nn.Module):
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
 
-    def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
+    def forward(self, x, attn_mask):
+        x = x + self.attn(self.ln_1(x), attn_mask)
         x = x + self.mlp(self.ln_2(x))
         return x
 
@@ -167,7 +168,7 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx, targets=None, attn_mask=None):
         device = idx.device
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
@@ -178,7 +179,7 @@ class GPT(nn.Module):
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
         for block in self.transformer.h:
-            x = block(x)
+            x = block(x, attn_mask)
         x = self.transformer.ln_f(x)
 
         if targets is not None:
@@ -382,16 +383,38 @@ class GPT(nn.Module):
 
         return idx
 
-def token_sort_rho(logits, targets, ref_model, idx, reverse_select, batch_select=False):
+def token_sort_rho(logits, targets, ref_model, idx, reverse_select, batch_select=False, scale_select=False, mask_select=0, value_select=False, ref_model_2=None):
     ignore_idx = -1 # the index of the token to ignore in the targets
     b, t, vocab_size = logits.size()
     #logits shape (b, t, vocab_size), targets shape (b, t), token_loss shape (b*t)
     
     with torch.no_grad():
         token_loss = F.cross_entropy(logits.view(-1, vocab_size), targets.view(-1), ignore_index=ignore_idx, reduction='none')
-        ref_logits, _ = ref_model(idx, targets)
-        ref_token_loss = F.cross_entropy(ref_logits.view(-1, vocab_size), targets.view(-1), ignore_index=ignore_idx, reduction='none')
-        diff_token_loss = token_loss - ref_token_loss
+        
+        if mask_select > 0:
+            attn_mask = torch.ones((1, 1, t, t), device=logits.device).tril(diagonal=0).triu(diagonal=-mask_select) # shape (1, 1, t, t)
+        elif mask_select < 0:
+            mask = torch.ones((1, 1, t, t), device=logits.device)
+            attn_mask = mask.tril(diagonal=0) + mask.triu(diagonal=-mask_select+1) # shape (1, 1, t, t)
+        else:
+            attn_mask = None
+        
+        if not value_select:
+            ref_model.eval() # set the reference model to eval mode
+            ref_logits, _ = ref_model(idx, targets, attn_mask)
+            ref_token_loss = F.cross_entropy(ref_logits.view(-1, vocab_size), targets.view(-1), ignore_index=ignore_idx, reduction='none')
+
+        if scale_select:
+            diff_token_loss = token_loss / (ref_token_loss + 1e-8)
+        elif value_select:
+            diff_token_loss = token_loss
+        elif ref_model_2 is not None:
+            ref_model_2.eval() # set the second reference model to eval mode
+            ref_logits_2, _ = ref_model_2(idx, targets, attn_mask)
+            ref_token_loss_2 = F.cross_entropy(ref_logits_2.view(-1, vocab_size), targets.view(-1), ignore_index=ignore_idx, reduction='none')
+            diff_token_loss = ref_token_loss_2 - ref_token_loss
+        else:
+            diff_token_loss = token_loss - ref_token_loss
         #ignore_mask = (targets.view(-1) == ignore_idx)
         #diff_token_loss = diff_token_loss.masked_fill(ignore_mask, -1e8) # ignore the -1 targets
         
@@ -403,10 +426,14 @@ def token_sort_rho(logits, targets, ref_model, idx, reverse_select, batch_select
             diff_token_loss = diff_token_loss.view(b, -1) # reshape to (b, t)
             sorted_diff_loss = torch.sort(diff_token_loss, descending=not reverse_select, dim=1)
             sorted_token_indices = sorted_diff_loss.indices #shape (b, t)
+            if value_select:
+                sorted_token_indices = sorted_token_indices[:, t//4: -t//4] # remove the top and bottom 1/8 of the tokens, to avoid the extreme values
+                # random selection of the tokens
+                #sorted_token_indices = torch.randperm(t, device=logits.device).view(1, -1).expand(b, -1) # shape (b, t)
         return sorted_token_indices, diff_token_loss
 
 
-def get_loss_rho(logits, targets, ref_model=None, idx=None, ratio=0.5, reverse_select=False, batch_select=False):
+def get_loss_rho(logits, targets, ref_model=None, idx=None, ratio=0.5, reverse_select=False, batch_select=False, scale_select=False, mask_select=0, value_select=False, ref_model_2=None):
     """
     Calculate the loss given the logits and targets.
     If ref_model is provided, use it to calculate the reference logits for KL divergence.
@@ -416,8 +443,10 @@ def get_loss_rho(logits, targets, ref_model=None, idx=None, ratio=0.5, reverse_s
         b, t, vocab_size = logits.size()
         #logits shape (b, t, vocab_size), targets shape (b, t), token_loss shape (b*t)
         token_loss = F.cross_entropy(logits.view(-1, vocab_size), targets.view(-1), ignore_index=ignore_idx, reduction='none')
+
+
         
-        sorted_token_indices, _ = token_sort_rho(logits, targets, ref_model, idx, reverse_select, batch_select)
+        sorted_token_indices, _ = token_sort_rho(logits, targets, ref_model, idx, reverse_select, batch_select, scale_select, mask_select, value_select, ref_model_2)
         # gather the average loss for the top-k tokens
         ignore_mask = (targets.view(-1) == ignore_idx) # shape (b*t,)
         loss = token_loss.masked_fill(ignore_mask, 0.0)  #shape (b*t,)
