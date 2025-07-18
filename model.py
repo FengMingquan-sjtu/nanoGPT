@@ -383,7 +383,7 @@ class GPT(nn.Module):
 
         return idx
 
-def token_sort_rho(logits, targets, ref_model, idx, reverse_select, batch_select=False, scale_select=False, mask_select=0, value_select=False, ref_model_2=None):
+def token_sort_rho(logits, targets, ref_model, idx, reverse_select, batch_select=False, scale_select=False, mask_select=0, value_select=False, ref_model_2=None, smooth_kernel_size=1):
     ignore_idx = -1 # the index of the token to ignore in the targets
     b, t, vocab_size = logits.size()
     #logits shape (b, t, vocab_size), targets shape (b, t), token_loss shape (b*t)
@@ -414,9 +414,17 @@ def token_sort_rho(logits, targets, ref_model, idx, reverse_select, batch_select
             ref_token_loss_2 = F.cross_entropy(ref_logits_2.view(-1, vocab_size), targets.view(-1), ignore_index=ignore_idx, reduction='none')
             diff_token_loss = ref_token_loss_2 - ref_token_loss
         else:
-            diff_token_loss = token_loss - ref_token_loss
+            diff_token_loss = token_loss - ref_token_loss # shape (b*t,)
         #ignore_mask = (targets.view(-1) == ignore_idx)
         #diff_token_loss = diff_token_loss.masked_fill(ignore_mask, -1e8) # ignore the -1 targets
+
+        if smooth_kernel_size > 1:
+            # smooth the token loss by averaging over the neighbors
+            diff_token_loss = diff_token_loss.view(b, 1, t)
+            padding = smooth_kernel_size // 2
+            diff_token_loss = F.avg_pool1d(diff_token_loss, kernel_size=smooth_kernel_size, stride=1, padding=padding) # shape (b, 1, t)
+            diff_token_loss = diff_token_loss.view(-1) # reshape to (b*t,)
+            
         
         #sorted_token_indices = torch.topk(diff_token_loss, k=t, dim=1).indices #shape (b, n_tokens)
         if batch_select:
@@ -433,7 +441,7 @@ def token_sort_rho(logits, targets, ref_model, idx, reverse_select, batch_select
         return sorted_token_indices, diff_token_loss
 
 
-def get_loss_rho(logits, targets, ref_model=None, idx=None, ratio=0.5, reverse_select=False, batch_select=False, scale_select=False, mask_select=0, value_select=False, ref_model_2=None):
+def get_loss_rho(logits, targets, ref_model=None, idx=None, ratio=0.5, reverse_select=False, batch_select=False, scale_select=False, mask_select=0, value_select=False, ref_model_2=None, smooth_kernel_size=1):
     """
     Calculate the loss given the logits and targets.
     If ref_model is provided, use it to calculate the reference logits for KL divergence.
@@ -446,7 +454,7 @@ def get_loss_rho(logits, targets, ref_model=None, idx=None, ratio=0.5, reverse_s
 
 
         
-        sorted_token_indices, _ = token_sort_rho(logits, targets, ref_model, idx, reverse_select, batch_select, scale_select, mask_select, value_select, ref_model_2)
+        sorted_token_indices, _ = token_sort_rho(logits, targets, ref_model, idx, reverse_select, batch_select, scale_select, mask_select, value_select, ref_model_2, smooth_kernel_size)
         # gather the average loss for the top-k tokens
         ignore_mask = (targets.view(-1) == ignore_idx) # shape (b*t,)
         loss = token_loss.masked_fill(ignore_mask, 0.0)  #shape (b*t,)

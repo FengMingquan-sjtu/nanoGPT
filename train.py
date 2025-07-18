@@ -54,6 +54,7 @@ scale_select = False # if True, select tokens by relative scale of loss instead 
 batch_select = False # if True, select tokens in batches, otherwise select tokens in sample.
 mask_select = 0 # if > 0, use attention mask to select tokens, otherwise use no mask.
 value_select = False # if True, use the value of the loss instead of the difference from the reference model.
+smooth_kernel_size = 1 # kernel size for smoothing the token loss, 1 means no smoothing
 # wandb logging
 wandb_log = False # disabled by default
 wandb_project = 'owt'
@@ -391,7 +392,7 @@ while True:
             model.train() 
             logits, _ = model(X, Y)
             if len(clustering_ckpt)==0:
-                loss = get_loss_rho(logits, Y, ref_model, X, token_keep_ratio, reverse_select, batch_select, scale_select, mask_select, value_select, ref_model_2)
+                loss = get_loss_rho(logits, Y, ref_model, X, token_keep_ratio, reverse_select, batch_select, scale_select, mask_select, value_select, ref_model_2, smooth_kernel_size)
             else:
                 loss = get_loss_cls_rho(logits, Y, ref_model, X, token_keep_ratio, cluster_analyzer, feature_extractor, reverse_select)
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
