@@ -383,6 +383,32 @@ class GPT(nn.Module):
 
         return idx
 
+def configure_AdamW_optimizer(model, weight_decay, learning_rate, betas, device_type):
+    # start with all of the candidate parameters
+    param_dict = {pn: p for pn, p in model.named_parameters()}
+    # filter out those that do not require grad
+    param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
+    # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
+    # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
+    decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+    nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+    optim_groups = [
+        {'params': decay_params, 'weight_decay': weight_decay},
+        {'params': nodecay_params, 'weight_decay': 0.0}
+    ]
+    num_decay_params = sum(p.numel() for p in decay_params)
+    num_nodecay_params = sum(p.numel() for p in nodecay_params)
+    print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
+    print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
+    # Create AdamW optimizer and use the fused version if it is available
+    fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+    use_fused = fused_available and device_type == 'cuda'
+    extra_args = dict(fused=True) if use_fused else dict()
+    optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
+    print(f"using fused AdamW: {use_fused}")
+    return optimizer
+
+
 def token_sort_rho(logits, targets, ref_model, idx, reverse_select, batch_select=False, scale_select=False, mask_select=0, value_select=False, ref_model_2=None, smooth_kernel_size=1):
     ignore_idx = -1 # the index of the token to ignore in the targets
     b, t, vocab_size = logits.size()
@@ -401,7 +427,8 @@ def token_sort_rho(logits, targets, ref_model, idx, reverse_select, batch_select
         
         if not value_select:
             ref_model.eval() # set the reference model to eval mode
-            ref_logits, _ = ref_model(idx, targets, attn_mask)
+            #ref_logits, _ = ref_model(idx, targets, attn_mask)
+            ref_logits = ref_model(idx, labels=targets, attention_mask=attn_mask).logits
             ref_token_loss = F.cross_entropy(ref_logits.view(-1, vocab_size), targets.view(-1), ignore_index=ignore_idx, reduction='none')
 
         if scale_select:
@@ -410,7 +437,8 @@ def token_sort_rho(logits, targets, ref_model, idx, reverse_select, batch_select
             diff_token_loss = token_loss
         elif ref_model_2 is not None:
             ref_model_2.eval() # set the second reference model to eval mode
-            ref_logits_2, _ = ref_model_2(idx, targets, attn_mask)
+            #ref_logits_2, _ = ref_model_2(idx, targets, attn_mask)
+            ref_logits_2 = ref_model_2(idx, labels=targets, attention_mask=attn_mask).logits
             ref_token_loss_2 = F.cross_entropy(ref_logits_2.view(-1, vocab_size), targets.view(-1), ignore_index=ignore_idx, reduction='none')
             diff_token_loss = ref_token_loss_2 - ref_token_loss
         else:

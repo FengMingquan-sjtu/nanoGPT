@@ -10,7 +10,9 @@
 #OMP_NUM_THREADS=4 /cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/torchrun --standalone --nproc_per_node 8 train.py config/cont_train_gpt2_owm_rho.py --token_keep_ratio=0.6 --wandb_run_name='cont-gpt2-1.5B-7.5B-0.6rho' --out_dir='out/cont-gpt2-1.5B-owm-7.5B-0.6rho'
 
 #---- standalone job cmds on DSW -----
-#OMP_NUM_THREADS=4 nohup /cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/torchrun --standalone --nproc_per_node 8 train.py config/cont_train_gpt2_owm_rho.py --ref_model_ckpt="" --wandb_log=False --compile=False --out_dir='out/tmp' --init_from='gpt2-large' --use_muon=True > log/gpt-owm-rho-0.log 2>&1 &
+#OMP_NUM_THREADS=4 nohup /cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/torchrun --standalone --nproc_per_node 8 train.py config/cont_train_gpt2_owm_rho.py --wandb_log=True --compile=True --wandb_run_name='cont-qwen2.5-1.5B' --out_dir='out/cont-qwen2.5-1.5B-owm-15B' --init_from='Qwen/Qwen2.5-1.5B' --ref_model_ckpt="" --dataset='/cpfs/user/fengmingquan/dataset/processed-qwen2/open-web-math' --batch_size=5 --gradient_accumulation_steps=96 > log/gpt-owm-rho-1.log 2>&1 &
+
+#OMP_NUM_THREADS=8 nohup /cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/torchrun --standalone --nproc_per_node 8 train.py config/cont_train_gpt2_owm_rho.py  --token_keep_ratio=0.4 --wandb_log=False --compile=False --out_dir='out/tmp' --init_from='Qwen/Qwen2.5-1.5B' --ref_model_ckpt="Qwen/Qwen2.5-Math-1.5B-Instruct" --dataset='/cpfs/user/fengmingquan/dataset/processed-qwen2/open-web-math' > log/gpt-owm-rho-1.log 2>&1 &
 
 #---- single gpu cmds on DSW ----
 #/cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/python train.py config/cont_train_gpt2_owm_rho.py --token_keep_ratio=0.6 --wandb_run_name='cont-gpt2-0.7B-7.5B-0.6rho' --out_dir='out/cont-gpt2-0.7B-owm-7.5B-0.6rho'
@@ -43,9 +45,9 @@ dataset = '/cpfs/user/fengmingquan/dataset/processed-gpt2/open-web-math' # path 
 
 # these make the total batch size be ~0.5M
 # 12 batch size * 1024 block size * 5 gradaccum * 8 GPUs = 491,520
-batch_size =  4   # 3 for 1.5B, 4 for 0.7B
+batch_size =  2   # 3 for 1.5B, 4 for 0.7B
 block_size = 1024
-gradient_accumulation_steps = 8 * 5 * 3
+gradient_accumulation_steps = 8*3*5*2
 
 # optimizer and lr
 # token per iter = 491,520

@@ -26,9 +26,11 @@ import numpy as np
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
+from transformers import AutoModelForCausalLM
 
 from model import GPTConfig, GPT
 from model import get_loss_rho, get_loss_cls_rho
+from model import configure_AdamW_optimizer
 from token_cluster import TokenClusteringAnalyzer, GPTFeatureExtractor
 
 os.environ["WANDB_API_KEY"] = "b7f26328382adc825eb193aac3f30f07e7da99c1" # set your wandb api key here
@@ -140,12 +142,16 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 #data_dir = os.path.join('data', dataset)
 data_dir = dataset 
 def get_batch(split):
+    if "qwen2" in data_dir:
+        dtype = np.uint32
+    else:
+        dtype = np.uint16
     # We recreate np.memmap every batch to avoid a memory leak, as per
     # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
     if split == 'train':
-        data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
+        data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=dtype, mode='r')
     else:
-        data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
+        data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=dtype, mode='r')
     ix = torch.randint(len(data) - block_size, (batch_size,))
     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
     y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
@@ -171,65 +177,72 @@ if os.path.exists(meta_path):
 
 # model init
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
-                  bias=bias, vocab_size=None, dropout=dropout) # start with model_args from command line
-if init_from == 'scratch':
-    # init a new model from scratch
-    print("Initializing a new model from scratch")
-    # determine the vocab size we'll use for from-scratch training
-    if meta_vocab_size is None:
-        print("defaulting to vocab_size of GPT-2 to 50304 (50257 rounded up for efficiency)")
-    model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else 50304
-    gptconf = GPTConfig(**model_args)
-    model = GPT(gptconf)
-elif init_from == 'resume':
-    print(f"Resuming training from {out_dir}")
-    # resume training from a checkpoint.
-    ckpt_path = os.path.join(out_dir, 'ckpt.pt')
-    checkpoint = torch.load(ckpt_path, map_location=device)
-    checkpoint_model_args = checkpoint['model_args']
-    # force these config attributes to be equal otherwise we can't even resume training
-    # the rest of the attributes (e.g. dropout) can stay as desired from command line
-    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
-        model_args[k] = checkpoint_model_args[k]
-    # create the model
-    gptconf = GPTConfig(**model_args)
-    model = GPT(gptconf)
-    state_dict = checkpoint['model']
-    model.load_ckp_state_dict(state_dict)
-    iter_num = checkpoint['iter_num']
-    best_val_loss = checkpoint['best_val_loss']
-elif init_from.startswith('gpt2'):
-    print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
-    # initialize from OpenAI GPT-2 weights
-    override_args = dict(dropout=dropout)
-    model = GPT.from_pretrained(init_from, override_args)
-    # read off the created config params, so we can store them into checkpoint correctly
-    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
-        model_args[k] = getattr(model.config, k)
-# crop down the model block size if desired, using model surgery
-if block_size < model.config.block_size:
-    model.crop_block_size(block_size)
-    model_args['block_size'] = block_size # so that the checkpoint will have the right value
+                  bias=bias, vocab_size=None, dropout=dropout) # NOTE: depracated. only for ckpt format compatibility
+#if init_from == 'scratch':
+#    # init a new model from scratch
+#    print("Initializing a new model from scratch")
+#    # determine the vocab size we'll use for from-scratch training
+#    if meta_vocab_size is None:
+#        print("defaulting to vocab_size of GPT-2 to 50304 (50257 rounded up for efficiency)")
+#    model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else 50304
+#    gptconf = GPTConfig(**model_args)
+#    model = GPT(gptconf)
+#elif init_from == 'resume':
+#    print(f"Resuming training from {out_dir}")
+#    # resume training from a checkpoint.
+#    ckpt_path = os.path.join(out_dir, 'ckpt.pt')
+#    checkpoint = torch.load(ckpt_path, map_location=device)
+#    checkpoint_model_args = checkpoint['model_args']
+#    # force these config attributes to be equal otherwise we can't even resume training
+#    # the rest of the attributes (e.g. dropout) can stay as desired from command line
+#    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
+#        model_args[k] = checkpoint_model_args[k]
+#    # create the model
+#    gptconf = GPTConfig(**model_args)
+#    model = GPT(gptconf)
+#    state_dict = checkpoint['model']
+#    model.load_ckp_state_dict(state_dict)
+#    iter_num = checkpoint['iter_num']
+#    best_val_loss = checkpoint['best_val_loss']
+#elif init_from.startswith('gpt2'):
+#    print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
+#    # initialize from OpenAI GPT-2 weights
+#    override_args = dict(dropout=dropout)
+#    model = GPT.from_pretrained(init_from, override_args)
+#    # read off the created config params, so we can store them into checkpoint correctly
+#    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
+#        model_args[k] = getattr(model.config, k)
+## crop down the model block size if desired, using model surgery
+#if block_size < model.config.block_size:
+#    model.crop_block_size(block_size)
+#    model_args['block_size'] = block_size # so that the checkpoint will have the right value
+
+model = AutoModelForCausalLM.from_pretrained(init_from)
 model.to(device)
 
 
 # load reference model checkpoint, used for data selection
 ref_model = None
+#if len(ref_model_ckpt)>0 and mask_select==0:
+#    print(f"Loading reference model from {ref_model_ckpt}")
+#    if ref_model_ckpt.endswith('.pt'):
+#        # resume training from a checkpoint.
+#        ref_checkpoint = torch.load(ref_model_ckpt, map_location=device)
+#        ref_model_args = ref_checkpoint['model_args']
+#        # create the model
+#        ref_gptconf = GPTConfig(**ref_model_args)
+#        ref_model = GPT(ref_gptconf)
+#        ref_state_dict = ref_checkpoint['model']
+#        ref_model.load_ckp_state_dict(ref_state_dict)
+#    else:
+#        # load from a pretrained model
+#        override_args = dict(dropout=dropout)
+#        ref_model = GPT.from_pretrained(ref_model_ckpt, override_args)
+#    ref_model.to(device)
+#    ref_model.eval()
+
 if len(ref_model_ckpt)>0 and mask_select==0:
-    print(f"Loading reference model from {ref_model_ckpt}")
-    if ref_model_ckpt.endswith('.pt'):
-        # resume training from a checkpoint.
-        ref_checkpoint = torch.load(ref_model_ckpt, map_location=device)
-        ref_model_args = ref_checkpoint['model_args']
-        # create the model
-        ref_gptconf = GPTConfig(**ref_model_args)
-        ref_model = GPT(ref_gptconf)
-        ref_state_dict = ref_checkpoint['model']
-        ref_model.load_ckp_state_dict(ref_state_dict)
-    else:
-        # load from a pretrained model
-        override_args = dict(dropout=dropout)
-        ref_model = GPT.from_pretrained(ref_model_ckpt, override_args)
+    ref_model = AutoModelForCausalLM.from_pretrained(ref_model_ckpt)
     ref_model.to(device)
     ref_model.eval()
 
@@ -257,7 +270,7 @@ scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 
 # optimizer
 if not use_muon:
-    optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
+    optimizer = configure_AdamW_optimizer(model, weight_decay, learning_rate, (beta1, beta2), device_type)
 else:
     print("Using Muon optimizer")
     optimizer = model.configure_muon_optimizer(weight_decay, learning_rate, (beta1, beta2), device_type)
@@ -312,7 +325,8 @@ def estimate_loss():
         for k in range(eval_iters):
             X, Y = get_batch(split)
             with ctx:
-                logits, loss = model(X, Y)
+                #logits, loss = model(X, Y)
+                loss = model(X, labels=Y).loss
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
@@ -390,7 +404,8 @@ while True:
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
             model.train() 
-            logits, _ = model(X, Y)
+            #logits, _ = model(X, Y)
+            logits = model(X, labels=Y).logits
             if len(clustering_ckpt)==0:
                 loss = get_loss_rho(logits, Y, ref_model, X, token_keep_ratio, reverse_select, batch_select, scale_select, mask_select, value_select, ref_model_2, smooth_kernel_size)
             else:
@@ -419,8 +434,9 @@ while True:
         # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
         lossf = loss.item() * gradient_accumulation_steps
         if local_iter_num >= 5: # let the training loop settle a bit
-            mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
-            running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
+            #mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
+            #running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
+            running_mfu = 0
         print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%, remaining {(max_iters - iter_num) * dt / 3600:.2f}h", flush=True)
         if wandb_log: wandb.log({"train/loss-single-step": lossf,}, step=iter_num)
     iter_num += 1
