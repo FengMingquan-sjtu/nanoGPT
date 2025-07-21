@@ -18,8 +18,10 @@ from tqdm import tqdm
 import numpy as np
 import tiktoken
 from datasets import load_dataset # huggingface datasets
+from transformers import AutoTokenizer
+from transformers import AutoModelForCausalLM
 
-from model import GPTConfig, GPT
+from model import GPTConfig, GPT, remove_prefix_from_state_dict
 
 
 os.environ["WANDB_API_KEY"] = "b7f26328382adc825eb193aac3f30f07e7da99c1" 
@@ -27,13 +29,19 @@ os.environ["WANDB_API_KEY"] = "b7f26328382adc825eb193aac3f30f07e7da99c1"
 class GSM8KDataset(Dataset):
     """Generic text dataset for different benchmark formats"""
     
-    def __init__(self, block_size=1024):
+    def __init__(self, block_size=1024, tokenizer_name="gpt2"):
         self.block_size = block_size
 
 
         # load dataset
         num_proc_load_dataset = 4
-        enc = tiktoken.get_encoding("gpt2")
+
+        if tokenizer_name == "gpt2":
+            enc = tiktoken.get_encoding("gpt2")
+            self.ignore_index = -1
+        else:
+            tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+            self.ignore_index = -100
         
         # GSM8K dataset
         dataset = load_dataset("openai/gsm8k", "main", num_proc=num_proc_load_dataset)
@@ -41,10 +49,17 @@ class GSM8KDataset(Dataset):
         
         # we now want to tokenize the dataset. first define the encoding function (gpt2 bpe)
         def process(example):
-            q_ids = enc.encode_ordinary(example['question']) # encode_ordinary ignores any special tokens
-            q_ids.append(enc.eot_token) # add the end of text token, e.g. 50256 for gpt2 bpe
-            a_ids = enc.encode_ordinary(example['answer']) # encode_ordinary ignores any special tokens
-            a_ids.append(enc.eot_token) # add the end of text token, e.g
+            if tokenizer_name == "gpt2":
+                q_ids = enc.encode_ordinary(example['question']) # encode_ordinary ignores any special tokens
+                a_ids = enc.encode_ordinary(example['answer']) # encode_ordinary ignores any special tokens
+                q_ids.append(enc.eot_token) # add the end of text token, e.g. 50256 for gpt2 bpe
+                a_ids.append(enc.eot_token) # add the end of text token, e.g
+            else:
+                q_ids = tokenizer.encode(example['question'], add_special_tokens=False)
+                a_ids = tokenizer.encode(example['answer'], add_special_tokens=False)
+                q_ids.append(tokenizer.eos_token_id)  # add the end of text token
+                a_ids.append(tokenizer.eos_token_id)  # add the end of text token
+
             out = {'q_ids': q_ids, 'a_ids': a_ids, 'len': len(q_ids) + len(a_ids)}
             return out
 
@@ -65,52 +80,68 @@ class GSM8KDataset(Dataset):
         torch_q_ids = torch.tensor(q_ids, dtype=torch.int64) #shape: (q_seq_len,)
         torch_a_ids = torch.tensor(a_ids, dtype=torch.int64) #shape: (a_seq_len,)
         x = torch.cat((torch_q_ids, torch_a_ids), dim=0)  # shape: (q_seq_len + a_seq_len,)
-        y = F.pad(torch_a_ids, (len(torch_q_ids)-1, 0), value=-1) # shape: (q_seq_len + a_seq_len - 1,).  Pad with -1 (ignore index) for the question part
+        y = F.pad(torch_a_ids, (len(torch_q_ids)-1, 0), value=self.ignore_index) # shape: (q_seq_len + a_seq_len - 1,).  Pad with -1 (ignore index) for the question part
         # Ensure x and y are of the same length block size
         if len(x) < self.block_size:
             padding_length = self.block_size - len(x)
             x = F.pad(x, (0, padding_length), value=x[-1])  # right pad x with last token (eos)
-            y = F.pad(y, (0, padding_length+1), value=-1)  # right pad y with -1 (ignore index)
+            y = F.pad(y, (0, padding_length+1), value=self.ignore_index)  # right pad y with -1 (ignore index)
         elif len(x) > self.block_size:
             x = x[-self.block_size:]
             y = y[-self.block_size:]
         
         return x, y
 
-def load_model(model_path, ckpt_step, device='cuda'):
+def load_model(model_path, ckpt_step, device='cuda', model_name='gpt2'):
     """Load trained model from checkpoint"""
     
+    if model_name == 'gpt2':
+        if ckpt_step>0:
+            model_fname = os.path.join(model_path, f'ckpt-{ckpt_step}.pt')
+            print(f"Loading model from {model_fname}")
+            checkpoint = torch.load(model_fname, map_location=device)
+            model_args = checkpoint['model_args']
+            
+            # Create model
+            gptconf = GPTConfig(**model_args)
+            model = GPT(gptconf)
+            
+            # Load state dict
+            state_dict = checkpoint['model']
+            model.load_ckp_state_dict(state_dict)
+            print(f"Loaded checkpoint")
+            
+        else:
+            # Try loading as pretrained GPT-2
+            model = GPT.from_pretrained("gpt2-xl", dict(dropout=0.0))
+            print(f"Warning: Loaded pretrained GPT-2 model")
     
-    if ckpt_step>0:
-        model_fname = os.path.join(model_path, f'ckpt-{ckpt_step}.pt')
-        print(f"Loading model from {model_fname}")
-        checkpoint = torch.load(model_fname, map_location=device)
-        model_args = checkpoint['model_args']
-        
-        # Create model
-        gptconf = GPTConfig(**model_args)
-        model = GPT(gptconf)
-        
-        # Load state dict
-        state_dict = checkpoint['model']
-        model.load_ckp_state_dict(state_dict)
-        print(f"Loaded checkpoint")
-        
     else:
-        # Try loading as pretrained GPT-2
-        model = GPT.from_pretrained("gpt2-xl", dict(dropout=0.0))
-        print(f"Warning: Loaded pretrained GPT-2 model")
+        # Load from HuggingFace model hub
+        print(f"Loading model {model_name} from HuggingFace")
+        if ckpt_step > 0:
+            model_fname = os.path.join(model_path, f'ckpt-{ckpt_step}.pt')
+            print(f"Loading model from {model_fname}")
+            checkpoint = torch.load(model_fname, map_location=device)
+            state_dict = checkpoint['model']
+            state_dict = remove_prefix_from_state_dict(state_dict)
+            model = AutoModelForCausalLM.from_pretrained(model_name, state_dict=state_dict)
+            print(f"Loaded checkpoint")
+        else:
+            print(f"Loading pretrained model {model_name}")
+            model = AutoModelForCausalLM.from_pretrained(model_name)
     
     model.to(device)
     model.eval()
     return model
 
 @torch.no_grad()
-def evaluate_perplexity(model, dataloader, device='cuda', max_batches=None):
+def evaluate_perplexity(model, dataloader, device='cuda', max_batches=None, model_name='gpt2'):
     """Evaluate perplexity on a dataset"""
     model.eval()
     total_loss = 0.0
     total_tokens = 0
+    ignore_index = dataloader.dataset.ignore_index
     
     # Setup mixed precision context
     device_type = 'cuda' if 'cuda' in device else 'cpu'
@@ -127,25 +158,29 @@ def evaluate_perplexity(model, dataloader, device='cuda', max_batches=None):
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
 
         with ctx:
-            logits, _ = model(x, y)
-            # Calculate loss for each token
-            loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)), 
-                y.view(-1), 
-                ignore_index=-1, 
-                reduction='sum'
-            )
+            with torch.no_grad():
+                if model_name == 'gpt2':
+                    logits, _ = model(x)
+                else:
+                    logits = model(x).logits
+                # Calculate loss for each token
+                loss = F.cross_entropy(
+                    logits.view(-1, logits.size(-1)), 
+                    y.view(-1), 
+                    ignore_index=ignore_index, 
+                    reduction='sum'
+                )
         
         # Count valid tokens (excluding ignore_index)
-        valid_tokens = (y != -1).sum().item()
-        
+        valid_tokens = (y != ignore_index).sum().item()
+
         total_loss += loss.item()
         total_tokens += valid_tokens
         
         # Update progress bar
-        if total_tokens > 0:
-            current_ppl = math.exp(total_loss / total_tokens)
-            #pbar.set_postfix({'PPL': f'{current_ppl:.2f}'})
+        #if total_tokens > 0:
+        #    current_ppl = math.exp(total_loss / total_tokens)
+        #    #pbar.set_postfix({'PPL': f'{current_ppl:.2f}'})
     
     if total_tokens == 0:
         return float('inf')
@@ -159,8 +194,8 @@ def main():
     parser = argparse.ArgumentParser(description='Evaluate model perplexity on benchmark datasets')
     parser.add_argument('--model_path', type=str, required=True, 
                        help='Path to model checkpoint or pretrained model name')
-    parser.add_argument('--model_arch', type=str, default='gpt2-xl',
-                       help='Model architecture to use, choose from: gpt2, gpt2-medium, gpt2-large, gpt2-xl')
+    parser.add_argument('--model_name', type=str, default='gpt2',
+                       help='Model architecture to use, choose from: gpt2, Qwen/Qwen2-1.5B, etc.')
     parser.add_argument('--data_path', type=str, default='openai/gsm8k',
                        help='Path to dataset or dataset name (default: openai/gsm8k)')
     parser.add_argument('--ckpt_step', type=int, default=0,
@@ -184,7 +219,7 @@ def main():
     
     # Load dataset
     print(f"Loading dataset {args.data_path}")
-    dataset = GSM8KDataset(block_size=args.block_size)
+    dataset = GSM8KDataset(block_size=args.block_size, tokenizer_name=args.model_name)
     
 
     dataloader = DataLoader(
@@ -200,14 +235,14 @@ def main():
     
 
     # Load model
-    model = load_model(args.model_path, args.ckpt_step, args.device)
-    print(f"Model loaded successfully. Parameters: {model.get_num_params()/1e6:.2f}M")
+    model = load_model(args.model_path, args.ckpt_step, args.device, args.model_name)
+
 
 
     # Evaluate perplexity
     print("Starting evaluation...")
     perplexity, avg_loss, total_tokens = evaluate_perplexity(
-        model, dataloader, args.device, args.max_batches
+        model, dataloader, args.device, args.max_batches, args.model_name
     )
     
     # Print results

@@ -285,10 +285,7 @@ class GPT(nn.Module):
         This is useful for resuming training or evaluation from a checkpoint.
         """
         # remove the unwanted prefix if it exists
-        unwanted_prefix = '_orig_mod.'
-        for k,v in list(ckp_state_dict.items()):
-            if k.startswith(unwanted_prefix):
-                ckp_state_dict[k[len(unwanted_prefix):]] = ckp_state_dict.pop(k)
+        ckp_state_dict = remove_prefix_from_state_dict(ckp_state_dict, '_orig_mod.')
         # load the state dict into the model
         self.load_state_dict(ckp_state_dict, strict=False)
 
@@ -382,6 +379,12 @@ class GPT(nn.Module):
             idx = torch.cat((idx, idx_next), dim=1)
 
         return idx
+
+def remove_prefix_from_state_dict(ckp_state_dict, unwanted_prefix = '_orig_mod.'):
+    for k,v in list(ckp_state_dict.items()):
+        if k.startswith(unwanted_prefix):
+            ckp_state_dict[k[len(unwanted_prefix):]] = ckp_state_dict.pop(k)
+    return ckp_state_dict
 
 def configure_AdamW_optimizer(model, weight_decay, learning_rate, betas, device_type):
     # start with all of the candidate parameters
