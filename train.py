@@ -27,6 +27,7 @@ import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 from transformers import AutoModelForCausalLM
+import torch.nn.functional as F
 
 from model import GPTConfig, GPT
 from model import get_loss_rho, get_loss_cls_rho
@@ -326,7 +327,8 @@ def estimate_loss():
             X, Y = get_batch(split)
             with ctx:
                 #logits, loss = model(X, Y)
-                loss = model(X, labels=Y).loss
+                logits = model(X).logits
+                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), Y.view(-1), reduction='mean')
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
@@ -405,11 +407,13 @@ while True:
         with ctx:
             model.train() 
             #logits, _ = model(X, Y)
-            logits = model(X, labels=Y).logits
-            if len(clustering_ckpt)==0:
-                loss = get_loss_rho(logits, Y, ref_model, X, token_keep_ratio, reverse_select, batch_select, scale_select, mask_select, value_select, ref_model_2, smooth_kernel_size)
-            else:
-                loss = get_loss_cls_rho(logits, Y, ref_model, X, token_keep_ratio, cluster_analyzer, feature_extractor, reverse_select)
+            logits = model(X).logits
+            
+            loss = get_loss_rho(logits, Y, ref_model, X, token_keep_ratio, reverse_select, batch_select, scale_select, mask_select, value_select, ref_model_2, smooth_kernel_size)
+            #if len(clustering_ckpt)==0:
+            #    loss = get_loss_rho(logits, Y, ref_model, X, token_keep_ratio, reverse_select, batch_select, scale_select, mask_select, value_select, ref_model_2, smooth_kernel_size)
+            #else:
+            #    loss = get_loss_cls_rho(logits, Y, ref_model, X, token_keep_ratio, cluster_analyzer, feature_extractor, reverse_select)
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = get_batch('train')
