@@ -26,15 +26,15 @@ from model import GPTConfig, GPT, remove_prefix_from_state_dict
 
 os.environ["WANDB_API_KEY"] = "b7f26328382adc825eb193aac3f30f07e7da99c1" 
 
-class GSM8KDataset(Dataset):
+class QADataset(Dataset):
     """Generic text dataset for different benchmark formats"""
     
-    def __init__(self, block_size=1024, tokenizer_name="gpt2"):
+    def __init__(self, dataset_name="gsm8k", block_size=1024, tokenizer_name="gpt2"):
         self.block_size = block_size
 
 
         # load dataset
-        num_proc_load_dataset = 4
+        num_proc_load_dataset = 8
 
         if tokenizer_name == "gpt2":
             enc = tiktoken.get_encoding("gpt2")
@@ -43,20 +43,29 @@ class GSM8KDataset(Dataset):
             tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
             self.ignore_index = -100
         
-        # GSM8K dataset
-        dataset = load_dataset("openai/gsm8k", "main", num_proc=num_proc_load_dataset)
-        testset = dataset["test"]
-        
+        if dataset_name == "gsm8k":
+            # GSM8K dataset
+            dataset = load_dataset("openai/gsm8k", "main", num_proc=num_proc_load_dataset)
+            testset = dataset["test"]
+            q_name = "question"
+            a_name = "answer"
+        elif dataset_name == "math":
+            # Math dataset
+            dataset = load_dataset("json", data_files="/cpfs/user/fengmingquan/math-evaluation-harness/data/math/test.jsonl", num_proc=num_proc_load_dataset)
+            testset = dataset["train"]
+            q_name = "problem"
+            a_name = "solution"
+
         # we now want to tokenize the dataset. first define the encoding function (gpt2 bpe)
         def process(example):
             if tokenizer_name == "gpt2":
-                q_ids = enc.encode_ordinary(example['question']) # encode_ordinary ignores any special tokens
-                a_ids = enc.encode_ordinary(example['answer']) # encode_ordinary ignores any special tokens
+                q_ids = enc.encode_ordinary(example[q_name]) # encode_ordinary ignores any special tokens
+                a_ids = enc.encode_ordinary(example[a_name]) # encode_ordinary ignores any special tokens
                 q_ids.append(enc.eot_token) # add the end of text token, e.g. 50256 for gpt2 bpe
                 a_ids.append(enc.eot_token) # add the end of text token, e.g
             else:
-                q_ids = tokenizer.encode(example['question'], add_special_tokens=False)
-                a_ids = tokenizer.encode(example['answer'], add_special_tokens=False)
+                q_ids = tokenizer.encode(example[q_name], add_special_tokens=False)
+                a_ids = tokenizer.encode(example[a_name], add_special_tokens=False)
                 q_ids.append(tokenizer.eos_token_id)  # add the end of text token
                 a_ids.append(tokenizer.eos_token_id)  # add the end of text token
 
@@ -66,7 +75,7 @@ class GSM8KDataset(Dataset):
         # tokenize the dataset
         self.testset_token = testset.map(
             process,
-            remove_columns=['question', 'answer'],
+            remove_columns=[q_name, a_name],
             desc="tokenizing the splits",
             num_proc=num_proc_load_dataset,
         )
@@ -196,8 +205,8 @@ def main():
                        help='Path to model checkpoint or pretrained model name')
     parser.add_argument('--model_name', type=str, default='gpt2',
                        help='Model architecture to use, choose from: gpt2, Qwen/Qwen2-1.5B, etc.')
-    parser.add_argument('--data_path', type=str, default='openai/gsm8k',
-                       help='Path to dataset or dataset name (default: openai/gsm8k)')
+    parser.add_argument('--dataset_name', type=str, default='gsm8k',
+                       help='dataset name to use, choose from: gsm8k, math')
     parser.add_argument('--ckpt_step', type=int, default=0,
                           help='Checkpoint step to load (if applicable)')
     parser.add_argument('--batch_size', type=int, default=64,
@@ -218,15 +227,15 @@ def main():
     
     
     # Load dataset
-    print(f"Loading dataset {args.data_path}")
-    dataset = GSM8KDataset(block_size=args.block_size, tokenizer_name=args.model_name)
-    
+    print(f"Loading dataset {args.dataset_name}")
+    dataset = QADataset(dataset_name=args.dataset_name, block_size=args.block_size, tokenizer_name=args.model_name)
+
 
     dataloader = DataLoader(
         dataset, 
         batch_size=args.batch_size, 
         shuffle=False, 
-        num_workers=4,
+        num_workers=8,
         pin_memory=True if 'cuda' in args.device else False
     )
     
@@ -249,7 +258,7 @@ def main():
     print("\n" + "="*50)
     print("EVALUATION RESULTS")
     print("="*50)
-    print(f"Dataset: {args.data_path}")
+    print(f"Dataset: {args.dataset_name}")
     print(f"Model: {args.model_path}")
     print(f"Total tokens evaluated: {total_tokens:,}")
     print(f"Average loss: {avg_loss:.4f}")
@@ -260,7 +269,7 @@ def main():
     if args.output_file:
         results = {
             'model_path': args.model_path,
-            'data_path': args.data_path,
+            'dataset_name': args.dataset_name,
             'perplexity': perplexity,
             'avg_loss': avg_loss,
             'block_size': args.block_size
@@ -272,9 +281,9 @@ def main():
     
     if args.wandb_id:
         wandb.init(id=args.wandb_id, resume='must', project="owm")
-        wandb.define_metric("gsm8k/ppl", step_metric="train_step")
+        wandb.define_metric(f"{args.dataset_name}/ppl", step_metric="train_step")
         wandb.log({
-            'gsm8k/ppl': perplexity,
+            f'{args.dataset_name}/ppl': perplexity,
             'train_step': args.ckpt_step,
         })
         wandb.finish()
