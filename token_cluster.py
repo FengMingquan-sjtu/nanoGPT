@@ -21,7 +21,7 @@ from typing import Dict, List, Tuple, Optional, Union
 import pandas as pd
 from collections import Counter, defaultdict
 
-from eval_ppl import  GSM8KDataset,load_model
+from eval_ppl import  load_model
 from model import GPT, GPTConfig
 
 class TextDataset(data.Dataset):

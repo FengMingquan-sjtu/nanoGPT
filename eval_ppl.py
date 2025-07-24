@@ -8,6 +8,7 @@ import pickle
 import argparse
 import json
 from contextlib import nullcontext
+import ast
 
 import wandb
 import numpy as np
@@ -224,7 +225,24 @@ def main():
     
     args = parser.parse_args()
     
-    
+    if args.model_name == "auto":
+        logfile = os.path.join(args.model_path, "out.log")
+        with open(logfile, 'r') as f:
+            for line in f:
+                if "configs are: " in line:
+                    configs = line.split("configs are: ")[-1].strip()
+                    configs = ast.literal_eval(configs)
+                    args.model_name = configs.get('init_from', 'gpt2')
+                    break
+        print(f"Auto-detected model name: {args.model_name}")
+    if args.wandb_id == "auto":
+        logfile = os.path.join(args.model_path, "out.log")
+        with open(logfile, 'r') as f:
+            for line in f:
+                if "wandb:" in line and "/runs/" in line:
+                    args.wandb_id = line.split("/runs/")[-1].strip()
+                    break
+        print(f"Auto-detected WandB ID: {args.wandb_id}")
     
     # Load dataset
     print(f"Loading dataset {args.dataset_name}")

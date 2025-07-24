@@ -144,15 +144,15 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 data_dir = dataset 
 def get_batch(split):
     if "qwen2" in data_dir:
-        dtype = np.uint32
+        data_dtype = np.uint32
     else:
-        dtype = np.uint16
+        data_dtype = np.uint16
     # We recreate np.memmap every batch to avoid a memory leak, as per
     # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
     if split == 'train':
-        data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=dtype, mode='r')
+        data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=data_dtype, mode='r')
     else:
-        data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=dtype, mode='r')
+        data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=data_dtype, mode='r')
     ix = torch.randint(len(data) - block_size, (batch_size,))
     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
     y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
@@ -220,6 +220,7 @@ model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=bloc
 
 model = AutoModelForCausalLM.from_pretrained(init_from)
 model.to(device)
+print(f"Loaded main model from {init_from}")
 
 
 # load reference model checkpoint, used for data selection
@@ -246,6 +247,7 @@ if len(ref_model_ckpt)>0 and mask_select==0:
     ref_model = AutoModelForCausalLM.from_pretrained(ref_model_ckpt)
     ref_model.to(device)
     ref_model.eval()
+    print(f"Loaded reference model from {ref_model_ckpt}")
 
 ref_model_2 = None
 if len(ref_model_ckpt_2)>0:
@@ -267,7 +269,7 @@ if len(ref_model_ckpt_2)>0:
     ref_model_2.eval()
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
-scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
+scaler = torch.amp.GradScaler("cuda", enabled=(dtype == 'float16'))
 
 # optimizer
 if not use_muon:
@@ -369,7 +371,7 @@ while True:
             frac = min(iter_num / 300, 1) # momentum warmup for muon
             param_group["momentum"] = (1 - frac) * 0.85 + frac * 0.95
     # evaluate the loss on train/val sets and write checkpoints
-    if iter_num % eval_interval == 0 and master_process:
+    if (iter_num % eval_interval == 0 or iter_num==eval_interval//2) and master_process:
         losses = estimate_loss()
         print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
         if wandb_log:

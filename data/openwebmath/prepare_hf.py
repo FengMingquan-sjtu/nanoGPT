@@ -17,10 +17,10 @@ num_proc_load_dataset = num_proc
 
 # Load tokenizer - 根据你的需求选择合适的tokenizer
 # 例如：gpt2, microsoft/DialoGPT-large, 或其他有大词汇表的模型
-tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2-0.5B")  # 请根据需要修改模型名称
+tokenizer = AutoTokenizer.from_pretrained("TinyLlama/TinyLlama_v1.1")  # 请根据需要修改模型名称
 
 input_path = "/cpfs/user/fengmingquan/dataset/raw/open-web-math"
-output_path = "/cpfs/user/fengmingquan/dataset/processed-qwen2/open-web-math"
+output_path = "/cpfs/user/fengmingquan/dataset/processed-llama2/open-web-math"
 
 if not os.path.exists(output_path):
     os.makedirs(output_path)
@@ -103,3 +103,5 @@ if __name__ == '__main__':
     # 读取文件时需要使用相同的数据类型
     print(f"\n# To read the bin files later, use the same dtype ({dtype}):")
     print(f"# m = np.memmap('train.bin', dtype=np.{dtype.__name__}, mode='r')")
+
+# nohup python data/openwebmath/prepare_hf.py > log/prepare_hf.log 2>&1 &
