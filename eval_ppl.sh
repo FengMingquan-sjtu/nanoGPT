@@ -2,19 +2,18 @@
 # This script evaluates the perplexity of a model on the GSM8K dataset using the eval_ppl.py script.
 # Usage:
 #   cd /cpfs/user/fengmingquan/nanoGPT
-#   nohup bash eval_ppl.sh > log/eval_ppl_5.out 2>&1 &
-model_path="out/cont-tinyllama-1.1B-owm-7.5B-0.4rho/2025-07-24_13-01-05"
+#   nohup bash eval_ppl.sh > log/eval_ppl_4.out 2>&1 &
+model_path="out/scrat-tinyllama-1.1B-owm-7.5B-0.4rho/2025-07-25_13-11-14"
 model_name="auto"  # Specify the model name
 wandb_id="auto"  # Set to "auto" to automatically find the wandb ID from the log file
-gpu_id=6
+gpu_id=4
 batch_size=16  # Adjust batch size as needed
 block_size=2048  # Adjust block size as needed
-dataset_name="math"  # Specify the dataset name, e.g., gsm8k or math
+dataset_name="gsm8k"  # Specify the dataset name, e.g., gsm8k or math
 
 checkpoints=(
-    2000
+    0 1000 2000
 )
-#    10000 12000 14000 16000 18000
 #    20000 22000 24000 26000 28000
 #    30000)
 for i in "${!checkpoints[@]}"; do

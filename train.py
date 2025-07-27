@@ -26,11 +26,11 @@ import numpy as np
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, AutoConfig
 import torch.nn.functional as F
 
 from model import GPTConfig, GPT
-from model import get_loss_rho, get_loss_cls_rho
+from model import get_loss_rho, get_loss_cls_rho, remove_prefix_from_state_dict
 from model import configure_AdamW_optimizer
 from token_cluster import TokenClusteringAnalyzer, GPTFeatureExtractor
 
@@ -47,7 +47,8 @@ log_interval = 1
 eval_iters = 200
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
-init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
+init_from = ''  # model name or path
+train_mode = 'cont_pretrain' # 'scratch' or 'resume' or 'cont_pretrain'
 # token selection
 ref_model_ckpt = "" # reference model file, used for data selection
 ref_model_ckpt_2 = "" # second reference model file, used for data selection
@@ -98,9 +99,15 @@ exec(open('configurator.py').read()) # overrides from command line or config fil
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
 # -----------------------------------------------------------------------------
 if int(os.environ.get('RANK', -1)) <= 0:
-    out_dir = os.path.join(out_dir, f'{time.strftime("%Y-%m-%d_%H-%M-%S")}')
-    os.makedirs(out_dir)
-    out_file = os.path.join(out_dir, 'out.log')
+    if train_mode != 'resume':
+        out_folder = os.path.join(out_dir, f'{time.strftime("%Y-%m-%d_%H-%M-%S")}')
+        os.makedirs(out_folder)
+    else:
+        # find the latest folder in the out_dir by sorting the folder names
+        folders = [f for f in os.listdir(out_dir) if os.path.isdir(os.path.join(out_dir, f)) and f.startswith('20')]
+        out_folder = os.path.join(out_dir, sorted(folders)[-1])
+    print(f"Output directory: {out_folder}")
+    out_file = os.path.join(out_folder, 'out.log')
     sys.stdout = open(out_file, 'a', buffering=30)
     sys.stderr = open(out_file, 'a', buffering=30)
     print("configs are:", config, flush=True)
@@ -218,9 +225,36 @@ model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=bloc
 #    model.crop_block_size(block_size)
 #    model_args['block_size'] = block_size # so that the checkpoint will have the right value
 
-model = AutoModelForCausalLM.from_pretrained(init_from)
+if train_mode == "cont_pretrain":
+    model = AutoModelForCausalLM.from_pretrained(init_from)
+    print(f"Loaded main model from {init_from}")
+elif train_mode == "scratch":
+    model_config = AutoConfig.from_pretrained(init_from)
+    model = AutoModelForCausalLM.from_config(model_config)
+    print(f"WARNING: Loaded initialized model from {init_from} with config: {model_config}")
+elif train_mode == "resume":
+    folders = [f for f in os.listdir(out_dir) if os.path.isdir(os.path.join(out_dir, f)) and f.startswith('20')]
+    out_folder = os.path.join(out_dir, sorted(folders)[-1])
+    print(f"Resuming training from {out_folder}")
+    logfile = os.path.join(out_folder, "out.log")
+    with open(logfile, 'r') as f:
+        for line in f:
+            if "wandb:" in line and "/runs/" in line:
+                wandb_id = line.split("/runs/")[-1].strip()
+                break
+    ckpts = [f for f in os.listdir(out_folder) if f.startswith('ckpt') and f.endswith('.pt')]
+    ckpt_path = os.path.join(out_folder, sorted(ckpts)[-1])
+    checkpoint = torch.load(ckpt_path, map_location=device)
+    model_config = AutoConfig.from_pretrained(init_from)
+    model = AutoModelForCausalLM.from_pretrained(init_from, config=model_config)
+    state_dict = checkpoint['model']
+    state_dict = remove_prefix_from_state_dict(state_dict)
+    model.load_state_dict(state_dict)
+    iter_num = checkpoint['iter_num']
+    best_val_loss = checkpoint['best_val_loss']
 model.to(device)
-print(f"Loaded main model from {init_from}")
+
+
 
 
 # load reference model checkpoint, used for data selection
@@ -277,7 +311,7 @@ if not use_muon:
 else:
     print("Using Muon optimizer")
     optimizer = model.configure_muon_optimizer(weight_decay, learning_rate, (beta1, beta2), device_type)
-if init_from == 'resume':
+if train_mode == 'resume':
     optimizer.load_state_dict(checkpoint['optimizer'])
 checkpoint = None # free up memory
 
@@ -353,7 +387,10 @@ def get_lr(it):
 # logging
 if wandb_log and master_process:
     import wandb
-    wandb.init(project=wandb_project, name=wandb_run_name, config=config)
+    if train_mode == 'resume':
+        wandb.init(id=wandb_id, resume='must', project=wandb_project, config=config)
+    else:
+        wandb.init(project=wandb_project, name=wandb_run_name, config=config)
 
 # training loop
 X, Y = get_batch('train') # fetch the very first batch
@@ -392,8 +429,8 @@ while True:
                     'best_val_loss': best_val_loss,
                     'config': config,
                 }
-                print(f"saving checkpoint to {out_dir}")
-                torch.save(checkpoint, os.path.join(out_dir, f'ckpt-{iter_num}.pt'))
+                print(f"saving checkpoint to {out_folder}")
+                torch.save(checkpoint, os.path.join(out_folder, f'ckpt-{iter_num}.pt'))
     if iter_num == 0 and eval_only:
         break
 
