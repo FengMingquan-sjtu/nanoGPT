@@ -32,6 +32,7 @@ import torch.nn.functional as F
 from model import GPTConfig, GPT
 from model import get_loss_rho, get_loss_cls_rho, remove_prefix_from_state_dict
 from model import configure_AdamW_optimizer
+from model_kinet import KINetGPT
 from token_cluster import TokenClusteringAnalyzer, GPTFeatureExtractor
 
 os.environ["WANDB_API_KEY"] = "b7f26328382adc825eb193aac3f30f07e7da99c1" # set your wandb api key here
@@ -225,33 +226,43 @@ model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=bloc
 #    model.crop_block_size(block_size)
 #    model_args['block_size'] = block_size # so that the checkpoint will have the right value
 
-if train_mode == "cont_pretrain":
-    model = AutoModelForCausalLM.from_pretrained(init_from)
-    print(f"Loaded main model from {init_from}")
-elif train_mode == "scratch":
-    model_config = AutoConfig.from_pretrained(init_from)
-    model = AutoModelForCausalLM.from_config(model_config)
-    print(f"WARNING: Loaded initialized model from {init_from} with config: {model_config}")
-elif train_mode == "resume":
-    folders = [f for f in os.listdir(out_dir) if os.path.isdir(os.path.join(out_dir, f)) and f.startswith('20')]
-    out_folder = os.path.join(out_dir, sorted(folders)[-1])
-    print(f"Resuming training from {out_folder}")
-    logfile = os.path.join(out_folder, "out.log")
-    with open(logfile, 'r') as f:
-        for line in f:
-            if "wandb:" in line and "/runs/" in line:
-                wandb_id = line.split("/runs/")[-1].strip()
-                break
-    ckpts = [f for f in os.listdir(out_folder) if f.startswith('ckpt') and f.endswith('.pt')]
-    ckpt_path = os.path.join(out_folder, sorted(ckpts)[-1])
-    checkpoint = torch.load(ckpt_path, map_location=device)
-    model_config = AutoConfig.from_pretrained(init_from)
-    model = AutoModelForCausalLM.from_pretrained(init_from, config=model_config)
-    state_dict = checkpoint['model']
-    state_dict = remove_prefix_from_state_dict(state_dict)
-    model.load_state_dict(state_dict)
-    iter_num = checkpoint['iter_num']
-    best_val_loss = checkpoint['best_val_loss']
+if "gpt" in init_from:
+    
+    print(f"Initializing KINETGPT from OpenAI GPT-2 weights: {init_from}")
+    # initialize from OpenAI GPT-2 weights
+    override_args = dict(dropout=dropout)
+    model = KINetGPT.from_pretrained(init_from)
+    # read off the created config params, so we can store them into checkpoint correctly
+    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
+        model_args[k] = getattr(model.config, k)
+else:
+    if train_mode == "cont_pretrain":
+        model = AutoModelForCausalLM.from_pretrained(init_from)
+        print(f"Loaded main model from {init_from}")
+    elif train_mode == "scratch":
+        model_config = AutoConfig.from_pretrained(init_from)
+        model = AutoModelForCausalLM.from_config(model_config)
+        print(f"WARNING: Loaded initialized model from {init_from} with config: {model_config}")
+    elif train_mode == "resume":
+        folders = [f for f in os.listdir(out_dir) if os.path.isdir(os.path.join(out_dir, f)) and f.startswith('20')]
+        out_folder = os.path.join(out_dir, sorted(folders)[-1])
+        print(f"Resuming training from {out_folder}")
+        logfile = os.path.join(out_folder, "out.log")
+        with open(logfile, 'r') as f:
+            for line in f:
+                if "wandb:" in line and "/runs/" in line:
+                    wandb_id = line.split("/runs/")[-1].strip()
+                    break
+        ckpts = [f for f in os.listdir(out_folder) if f.startswith('ckpt') and f.endswith('.pt')]
+        ckpt_path = os.path.join(out_folder, sorted(ckpts)[-1])
+        checkpoint = torch.load(ckpt_path, map_location=device)
+        model_config = AutoConfig.from_pretrained(init_from)
+        model = AutoModelForCausalLM.from_pretrained(init_from, config=model_config)
+        state_dict = checkpoint['model']
+        state_dict = remove_prefix_from_state_dict(state_dict)
+        model.load_state_dict(state_dict)
+        iter_num = checkpoint['iter_num']
+        best_val_loss = checkpoint['best_val_loss']
 model.to(device)
 
 
@@ -362,9 +373,11 @@ def estimate_loss():
         for k in range(eval_iters):
             X, Y = get_batch(split)
             with ctx:
-                #logits, loss = model(X, Y)
-                logits = model(X).logits
-                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), Y.view(-1), reduction='mean')
+                if init_from.startswith('gpt2'):
+                    logits, loss = model(X, Y)
+                else:
+                    logits = model(X).logits
+                    loss = F.cross_entropy(logits.view(-1, logits.size(-1)), Y.view(-1), reduction='mean')
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
@@ -445,8 +458,10 @@ while True:
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
             model.train() 
-            #logits, _ = model(X, Y)
-            logits = model(X).logits
+            if init_from.startswith('gpt2'):
+                logits, _ = model(X, Y)
+            else:
+                logits = model(X).logits
             
             loss = get_loss_rho(logits, Y, ref_model, X, token_keep_ratio, reverse_select, batch_select, scale_select, mask_select, value_select, ref_model_2, smooth_kernel_size)
             #if len(clustering_ckpt)==0:
