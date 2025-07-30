@@ -17,31 +17,15 @@ num_proc = 80
 num_proc_load_dataset = num_proc
 
 enc = tiktoken.get_encoding("gpt2")
-input_path = "/cpfs/user/fengmingquan/dataset/raw/openwebtext"
-output_path = "/cpfs/user/fengmingquan/dataset/processed-gpt2/open-web-text"
+input_path = "/cpfs/user/fengmingquan/dataset/raw/slimpajama"
+output_path = "/cpfs/user/fengmingquan/dataset/processed-gpt2/slimpajama"
 if not os.path.exists(output_path):
     os.makedirs(output_path)
 
 if __name__ == '__main__':
-    # takes 54GB in huggingface .cache dir, about 8M documents (8,013,769)
+
     dataset = load_dataset(input_path, num_proc=num_proc_load_dataset, trust_remote_code=True)
 
-    # owt by default only contains the 'train' split, so create a test split
-    split_dataset = dataset["train"].train_test_split(test_size=0.001, seed=2357, shuffle=True)
-    split_dataset['val'] = split_dataset.pop('test') # rename the test split to val
-
-    # this results in:
-    # >>> split_dataset
-    # DatasetDict({
-    #     train: Dataset({
-    #         features: ['text'],
-    #         num_rows: 8009762
-    #     })
-    #     val: Dataset({
-    #         features: ['text'],
-    #         num_rows: 4007
-    #     })
-    # })
 
     # we now want to tokenize the dataset. first define the encoding function (gpt2 bpe)
     def process(example):
@@ -52,7 +36,7 @@ if __name__ == '__main__':
         return out
 
     # tokenize the dataset
-    tokenized = split_dataset.map(
+    tokenized = dataset.map(
         process,
         remove_columns=['text'],
         desc="tokenizing the splits",
@@ -77,7 +61,7 @@ if __name__ == '__main__':
             idx += len(arr_batch)
         arr.flush()
         print(f"Saved {split} dataset to {filename} with {len(dset)} samples and {arr_len} tokens.")
-    # train.bin is ~17GB, val.bin ~8.5MB
+
     # train has ~9B tokens (9,035,582,198)
     # val has ~4M tokens (4,434,897)
 
@@ -85,4 +69,4 @@ if __name__ == '__main__':
     # m = np.memmap('train.bin', dtype=np.uint16, mode='r')
 
 
-# nohup /cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/python data/openwebtext/prepare.py > log/data.log 2>&1 &
+# nohup /cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/python data/slimpajama/prepare.py > log/data.log 2>&1 &
