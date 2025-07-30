@@ -23,6 +23,7 @@ from transformers import AutoTokenizer
 from transformers import AutoModelForCausalLM
 
 from model import GPTConfig, GPT, remove_prefix_from_state_dict
+from model_kinet import KINetGPT
 
 
 os.environ["WANDB_API_KEY"] = "b7f26328382adc825eb193aac3f30f07e7da99c1" 
@@ -37,7 +38,7 @@ class QADataset(Dataset):
         # load dataset
         num_proc_load_dataset = 8
 
-        if tokenizer_name == "gpt2":
+        if tokenizer_name.startswith("gpt2"):
             enc = tiktoken.get_encoding("gpt2")
             self.ignore_index = -1
         else:
@@ -59,7 +60,7 @@ class QADataset(Dataset):
 
         # we now want to tokenize the dataset. first define the encoding function (gpt2 bpe)
         def process(example):
-            if tokenizer_name == "gpt2":
+            if tokenizer_name.startswith("gpt2"):
                 q_ids = enc.encode_ordinary(example[q_name]) # encode_ordinary ignores any special tokens
                 a_ids = enc.encode_ordinary(example[a_name]) # encode_ordinary ignores any special tokens
                 q_ids.append(enc.eot_token) # add the end of text token, e.g. 50256 for gpt2 bpe
@@ -105,7 +106,7 @@ class QADataset(Dataset):
 def load_model(model_path, ckpt_step, device='cuda', model_name='gpt2'):
     """Load trained model from checkpoint"""
     
-    if model_name == 'gpt2':
+    if model_name.startswith("gpt2"):
         if ckpt_step>0:
             model_fname = os.path.join(model_path, f'ckpt-{ckpt_step}.pt')
             print(f"Loading model from {model_fname}")
@@ -114,7 +115,12 @@ def load_model(model_path, ckpt_step, device='cuda', model_name='gpt2'):
             
             # Create model
             gptconf = GPTConfig(**model_args)
-            model = GPT(gptconf)
+            if 'kinet' in model_path:
+                print(f"Loading KINetGPT model")
+                model = KINetGPT(gptconf)
+            else:
+                print(f"Loading GPT model")
+                model = GPT(gptconf)
             
             # Load state dict
             state_dict = checkpoint['model']
@@ -123,9 +129,10 @@ def load_model(model_path, ckpt_step, device='cuda', model_name='gpt2'):
             
         else:
             # Try loading as pretrained GPT-2
-            model = GPT.from_pretrained("gpt2-xl", dict(dropout=0.0))
-            print(f"Warning: Loaded pretrained GPT-2 model")
-    
+
+            model = GPT.from_pretrained(model_name, dict(dropout=0.0))
+            print(f"Warning: Loaded pretrained GPT-2 model {model_name}")
+
     else:
         # Load from HuggingFace model hub
         print(f"Loading model {model_name} from HuggingFace")
@@ -169,8 +176,8 @@ def evaluate_perplexity(model, dataloader, device='cuda', max_batches=None, mode
 
         with ctx:
             with torch.no_grad():
-                if model_name == 'gpt2':
-                    logits, _ = model(x)
+                if model_name.startswith('gpt2'):
+                    logits, _ = model(x, y)
                 else:
                     logits = model(x).logits
                 # Calculate loss for each token
@@ -225,6 +232,12 @@ def main():
     
     args = parser.parse_args()
     
+    if not os.path.basename(args.model_path).startswith("20"):
+        # Find the latest folder starting with '20' (e.g. 2025-07-28_22-41-45)
+        folders = [f for f in os.listdir(args.model_path) if os.path.isdir(os.path.join(args.model_path, f)) and f.startswith('20')]
+        args.model_path = os.path.join(args.model_path, sorted(folders)[-1])
+        print(f"Auto-detected latest folder: {args.model_path}")
+        
     if args.model_name == "auto":
         logfile = os.path.join(args.model_path, "out.log")
         with open(logfile, 'r') as f:
@@ -244,6 +257,7 @@ def main():
                     break
         print(f"Auto-detected WandB ID: {args.wandb_id}")
     
+
     # Load dataset
     print(f"Loading dataset {args.dataset_name}")
     dataset = QADataset(dataset_name=args.dataset_name, block_size=args.block_size, tokenizer_name=args.model_name)

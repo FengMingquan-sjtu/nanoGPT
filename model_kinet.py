@@ -15,6 +15,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from model import remove_prefix_from_state_dict
 
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
@@ -493,3 +494,12 @@ class KINetGPT(nn.Module):
             idx = torch.cat((idx, idx_next), dim=1)
 
         return idx
+    def load_ckp_state_dict(self, ckp_state_dict):
+        """
+        Load a state dict from a checkpoint, which may have been saved with a different config.
+        This is useful for resuming training or evaluation from a checkpoint.
+        """
+        # remove the unwanted prefix if it exists
+        ckp_state_dict = remove_prefix_from_state_dict(ckp_state_dict, '_orig_mod.')
+        # load the state dict into the model
+        self.load_state_dict(ckp_state_dict, strict=False)

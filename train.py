@@ -228,10 +228,15 @@ model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=bloc
 
 if "gpt" in init_from:
     
-    print(f"Initializing KINETGPT from OpenAI GPT-2 weights: {init_from}")
+    
     # initialize from OpenAI GPT-2 weights
     override_args = dict(dropout=dropout)
-    model = KINetGPT.from_pretrained(init_from)
+    if "kinet" in out_dir:
+        print(f"WARNING: Initializing KINETGPT from OpenAI GPT-2 weights: {init_from}")
+        model = KINetGPT.from_pretrained(init_from, override_args)
+    else:
+        print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
+        model = GPT.from_pretrained(init_from, override_args)
     # read off the created config params, so we can store them into checkpoint correctly
     for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
         model_args[k] = getattr(model.config, k)
