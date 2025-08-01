@@ -36,6 +36,8 @@ from model_kinet import KINetGPT
 from token_cluster import TokenClusteringAnalyzer, GPTFeatureExtractor
 
 os.environ["WANDB_API_KEY"] = "b7f26328382adc825eb193aac3f30f07e7da99c1" # set your wandb api key here
+rank = int(os.environ.get('RANK', 0))
+os.environ['TRITON_CACHE_DIR'] = f'/prodcpfs/user/fengmingquan/triton_cache/rank_{rank}'
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # rho algorithm

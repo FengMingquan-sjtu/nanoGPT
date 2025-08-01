@@ -18,7 +18,9 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 import numpy as np
 import tiktoken
-from datasets import load_dataset # huggingface datasets
+import datasets
+from datasets import load_dataset, concatenate_datasets # huggingface datasets
+import huggingface_hub
 from transformers import AutoTokenizer
 from transformers import AutoModelForCausalLM
 
@@ -27,6 +29,7 @@ from model_kinet import KINetGPT
 
 
 os.environ["WANDB_API_KEY"] = "b7f26328382adc825eb193aac3f30f07e7da99c1" 
+
 
 class QADataset(Dataset):
     """Generic text dataset for different benchmark formats"""
@@ -49,25 +52,85 @@ class QADataset(Dataset):
             # GSM8K dataset
             dataset = load_dataset("openai/gsm8k", "main", num_proc=num_proc_load_dataset)
             testset = dataset["test"]
-            q_name = "question"
-            a_name = "answer"
+            q_func = lambda example: example['question'] + " Answer:"
+            a_func = lambda example: example['answer']
+
         elif dataset_name == "math":
             # Math dataset
             dataset = load_dataset("json", data_files="/cpfs/user/fengmingquan/math-evaluation-harness/data/math/test.jsonl", num_proc=num_proc_load_dataset)
             testset = dataset["train"]
-            q_name = "problem"
-            a_name = "solution"
+            q_func = lambda example: example['problem'] + " Solution:"
+            a_func = lambda example: example['solution']
+        elif dataset_name == "mathqa":
+            # Math QA dataset
+            dataset = load_dataset("json", data_files="/cpfs/user/fengmingquan/math-evaluation-harness/data/mathqa/test.jsonl", num_proc=num_proc_load_dataset)
+            testset = dataset["train"]
+            q_func = lambda example: example['problem'] + "? Options:" + example['options'] + " Answer:"
+            a_func = lambda example: example['rationale']
+        elif dataset_name == "asdiv":
+            # ASDiv dataset
+            dataset = load_dataset("json", data_files="/cpfs/user/fengmingquan/math-evaluation-harness/data/asdiv/test.jsonl", num_proc=num_proc_load_dataset)
+            testset = dataset["train"]
+            q_func = lambda example: example['body'] + " " + example['question'] + " Answer:"
+            a_func = lambda example: example['answer']
+        elif dataset_name == "mawps":
+            # MAWPS dataset
+            dataset = load_dataset("json", data_files="/cpfs/user/fengmingquan/math-evaluation-harness/data/mawps/test.jsonl", num_proc=num_proc_load_dataset)
+            testset = dataset["train"]
+            q_func = lambda example: example['input'] + " Answer:"
+            a_func = lambda example: str(example['target'])
+        elif dataset_name == "mmlu_stem":
+            # MMLU STEM dataset
+            dataset = load_dataset("json", data_files="/cpfs/user/fengmingquan/math-evaluation-harness/data/mmlu_stem/test.jsonl", num_proc=num_proc_load_dataset)
+            testset = dataset["train"]
+            q_func = lambda example: example['question'] + " Options: " + ", ".join(example['choices']) + " Answer:"
+            a_func = lambda example: example['choices'][example['answer']]
+        elif dataset_name == "ocw":
+            # OpenCourseWare dataset
+            dataset = load_dataset("json", data_files="/cpfs/user/fengmingquan/math-evaluation-harness/data/ocw/test.jsonl", num_proc=num_proc_load_dataset)
+            testset = dataset["train"]
+            q_func = lambda example: example['problem'] + " Solution:"
+            a_func = lambda example: example['solution']
+        elif dataset_name == "sat_math":
+            # SAT Math dataset
+            dataset = load_dataset("json", data_files="/cpfs/user/fengmingquan/math-evaluation-harness/data/sat_math/test.jsonl", num_proc=num_proc_load_dataset)
+            testset = dataset["train"]
+            q_func = lambda example: example['question'] + " Options: " + example['options'] + " Answer:"
+            a_func = lambda example: example['Answer']
+        elif dataset_name == "svamp":
+            # SVAMP dataset
+            dataset = load_dataset("json", data_files="/cpfs/user/fengmingquan/math-evaluation-harness/data/svamp/test.jsonl", num_proc=num_proc_load_dataset)
+            testset = dataset["train"]
+            q_func = lambda example: example['Body'] + example['Question'] + " Answer:"
+            a_func = lambda example: str(int(example['Answer']))
+        
+        # ------ general domain -----
+        elif dataset_name == "bbh":
+            subset_names = list(datasets.get_dataset_infos('lukaemon/bbh').keys())
+            dataset = concatenate_datasets([
+                load_dataset('lukaemon/bbh', subset_name, num_proc=num_proc_load_dataset)['test']
+                for subset_name in subset_names
+            ])
+            testset = dataset
+            q_func = lambda example: example['input']
+            a_func = lambda example: example['target']
+        elif dataset_name == "gpqa":
+            huggingface_hub.login(token="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")
+            dataset = load_dataset("Idavidrein/gpqa", "gpqa_main", num_proc=num_proc_load_dataset)
+            testset = dataset["train"]
+            q_func = lambda example: example['Question']
+            a_func = lambda example: example['Explanation']
 
         # we now want to tokenize the dataset. first define the encoding function (gpt2 bpe)
         def process(example):
             if tokenizer_name.startswith("gpt2"):
-                q_ids = enc.encode_ordinary(example[q_name]) # encode_ordinary ignores any special tokens
-                a_ids = enc.encode_ordinary(example[a_name]) # encode_ordinary ignores any special tokens
+                q_ids = enc.encode_ordinary(q_func(example)) # encode_ordinary ignores any special tokens
+                a_ids = enc.encode_ordinary(a_func(example)) # encode_ordinary ignores any special tokens
                 q_ids.append(enc.eot_token) # add the end of text token, e.g. 50256 for gpt2 bpe
                 a_ids.append(enc.eot_token) # add the end of text token, e.g
             else:
-                q_ids = tokenizer.encode(example[q_name], add_special_tokens=False)
-                a_ids = tokenizer.encode(example[a_name], add_special_tokens=False)
+                q_ids = tokenizer.encode(q_func(example), add_special_tokens=False)
+                a_ids = tokenizer.encode(a_func(example), add_special_tokens=False)
                 q_ids.append(tokenizer.eos_token_id)  # add the end of text token
                 a_ids.append(tokenizer.eos_token_id)  # add the end of text token
 
@@ -77,7 +140,6 @@ class QADataset(Dataset):
         # tokenize the dataset
         self.testset_token = testset.map(
             process,
-            remove_columns=[q_name, a_name],
             desc="tokenizing the splits",
             num_proc=num_proc_load_dataset,
         )

@@ -8,19 +8,21 @@ from datasets import load_dataset  # huggingface datasets
 
 # number of workers in .map() call
 # good number to use is ~order number of cpu cores // 2
-num_proc = 80
+num_proc = 20
 
 # number of workers in load_dataset() call
 # best number might be different from num_proc above as it also depends on NW speed.
 # it is better than 1 usually though
-num_proc_load_dataset = num_proc
+num_proc_load_dataset = 40
 
 # Load tokenizer - 根据你的需求选择合适的tokenizer
 # 例如：gpt2, microsoft/DialoGPT-large, 或其他有大词汇表的模型
 tokenizer = AutoTokenizer.from_pretrained("/cpfs/user/fengmingquan/TinyLlama_v1.1")  # 请根据需要修改模型名称
 
-input_path = "/cpfs/user/fengmingquan/dataset/raw/slimpajama"
-output_path = "/cpfs/user/fengmingquan/dataset/processed-llama2/slimpajama"
+# download data by:
+# juicefs sync -u -p 100 oss://LTAI5tDuCoTTh6gu5PK8gFfN:6eZGIEeLo81eRSqYRMHUEG2FcVTkQV@lsg-oss-chatgpt-agi-hcfs.oss-ap-southeast-1-internal.aliyuncs.com/crawl/multimodal/cerebras/SlimPajama-627B slimpajama
+input_path = "/prodcpfs/user/fengmingquan/dataset/raw/slimpajama"
+output_path = "/prodcpfs/user/fengmingquan/dataset/processed-llama2/slimpajama-wiki"
 
 if not os.path.exists(output_path):
     os.makedirs(output_path)
@@ -30,16 +32,13 @@ if __name__ == '__main__':
     print(f"Using tokenizer: {tokenizer.name_or_path}")
     print(f"Vocab size: {tokenizer.vocab_size}")
     print(f"EOS token ID: {tokenizer.eos_token_id}")
-    
-    # takes 27GB in huggingface .cache dir, about 6.32M documents
+
     dataset = load_dataset(input_path, num_proc=num_proc_load_dataset)
 
-    # filter the dataset by the urls that contains one of the following keywords
-    #keywords = ['stackexchange.com', 'nature.com', 'wordpress.com', 'physicsforums.com',
-    #            'github.io', 'zbmath.org', 'wikipedia.org', 'groundai.com', 'blogspot.com','mathoverflow.net']
-    #def filter_function(example):
-    #    return any(keyword in example['url'] for keyword in keywords)
-    #dataset = dataset.filter(filter_function, num_proc=num_proc_load_dataset)
+    # filter the dataset 
+    def filter_function(example):
+        return example['meta']["redpajama_set_name"]  == "RedPajamaWikipedia" # 23.5B tokens
+    dataset = dataset.filter(filter_function, num_proc=num_proc_load_dataset)
     
     # owt by default only contains the 'train' split, so create a test split
     if not ("val" in dataset):
@@ -108,4 +107,4 @@ if __name__ == '__main__':
     print(f"\n# To read the bin files later, use the same dtype ({dtype}):")
     print(f"# m = np.memmap('train.bin', dtype=np.{dtype.__name__}, mode='r')")
 
-# nohup /cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/python data/slimpajama/prepare_hf.py > log/prepare_hf.log 2>&1 &
+# nohup /cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/python data/slimpajama/prepare_hf.py > log/prepare_hf_2.log 2>&1 &
