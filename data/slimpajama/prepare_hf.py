@@ -21,9 +21,10 @@ tokenizer = AutoTokenizer.from_pretrained("/cpfs/user/fengmingquan/TinyLlama_v1.
 
 # download data by:
 # juicefs sync -u -p 100 oss://LTAI5tDuCoTTh6gu5PK8gFfN:6eZGIEeLo81eRSqYRMHUEG2FcVTkQV@lsg-oss-chatgpt-agi-hcfs.oss-ap-southeast-1-internal.aliyuncs.com/crawl/multimodal/cerebras/SlimPajama-627B slimpajama
-input_path = "/prodcpfs/user/fengmingquan/dataset/raw/slimpajama"
-output_path = "/prodcpfs/user/fengmingquan/dataset/processed-llama2/slimpajama-wiki"
-
+#input_path = "/prodcpfs/user/fengmingquan/dataset/raw/slimpajama"
+#output_path = "/prodcpfs/user/fengmingquan/dataset/processed-llama2/slimpajama-wiki"
+input_path = "/prodcpfs/user/fengmingquan/dataset/raw/tiny-pajama-parquet"
+output_path = "/prodcpfs/user/fengmingquan/dataset/processed-llama2/tinypajama"
 if not os.path.exists(output_path):
     os.makedirs(output_path)
 
@@ -36,9 +37,9 @@ if __name__ == '__main__':
     dataset = load_dataset(input_path, num_proc=num_proc_load_dataset)
 
     # filter the dataset 
-    def filter_function(example):
-        return example['meta']["redpajama_set_name"]  == "RedPajamaWikipedia" # 23.5B tokens
-    dataset = dataset.filter(filter_function, num_proc=num_proc_load_dataset)
+    #def filter_function(example):
+    #    return example['meta']["redpajama_set_name"]  == "RedPajamaWikipedia" # 23.5B tokens
+    #dataset = dataset.filter(filter_function, num_proc=num_proc_load_dataset)
     
     # owt by default only contains the 'train' split, so create a test split
     if not ("val" in dataset):
@@ -108,3 +109,6 @@ if __name__ == '__main__':
     print(f"# m = np.memmap('train.bin', dtype=np.{dtype.__name__}, mode='r')")
 
 # nohup /cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/python data/slimpajama/prepare_hf.py > log/prepare_hf_2.log 2>&1 &
+
+
+# tinyslimpajama-llama2 --> 11781682127 = 11.7B tokens
