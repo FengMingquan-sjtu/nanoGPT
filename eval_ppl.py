@@ -34,12 +34,13 @@ os.environ["WANDB_API_KEY"] = "b7f26328382adc825eb193aac3f30f07e7da99c1"
 class QADataset(Dataset):
     """Generic text dataset for different benchmark formats"""
     
-    def __init__(self, dataset_name="gsm8k", block_size=1024, tokenizer_name="gpt2"):
+    def __init__(self, dataset_name="gsm8k", block_size=1024, tokenizer_name="gpt2", n_shot_prompt=0, num_proc_load_dataset=8):
+        
         self.block_size = block_size
-
+        self.n_shot_prompt = n_shot_prompt
 
         # load dataset
-        num_proc_load_dataset = 8
+        num_proc_load_dataset = num_proc_load_dataset if num_proc_load_dataset > 0 else 8
 
         if tokenizer_name.startswith("gpt2"):
             enc = tiktoken.get_encoding("gpt2")
@@ -104,7 +105,7 @@ class QADataset(Dataset):
             q_func = lambda example: example['Body'] + example['Question'] + " Answer:"
             a_func = lambda example: str(int(example['Answer']))
         
-        # ------ general domain -----
+        
         elif dataset_name == "bbh":
             subset_names = list(datasets.get_dataset_infos('lukaemon/bbh').keys())
             dataset = concatenate_datasets([
@@ -115,11 +116,30 @@ class QADataset(Dataset):
             q_func = lambda example: example['input']
             a_func = lambda example: example['target']
         elif dataset_name == "gpqa":
-            huggingface_hub.login(token="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")
+            key_file = "/cpfs/user/fengmingquan/nanoGPT/hf_key.txt"
+            with open(key_file, 'r') as f:
+                hf_key = f.read().strip()
+            huggingface_hub.login(token=hf_key)
             dataset = load_dataset("Idavidrein/gpqa", "gpqa_main", num_proc=num_proc_load_dataset)
             testset = dataset["train"]
             q_func = lambda example: example['Question']
             a_func = lambda example: example['Explanation']
+
+        # ------ general domain -----
+        elif dataset_name in ["arc_e", "arc_c"]:
+            subset_name = "ARC-Easy" if dataset_name == "arc_e" else "ARC-Challenge"
+            dataset = load_dataset("allenai/ai2_arc", subset_name, num_proc=num_proc_load_dataset)
+            testset = dataset["test"]
+            q_func = lambda example: 'Question: ' + example['question'] + " Options: " + ", ".join(example['choices']["text"]) + ". Answer:"
+            a_func = lambda example: example['choices']["text"][example['choices']["label"].index(example['answerKey'])]
+        
+        elif dataset_name == "hellaswag":
+            # HellaSwag dataset
+            dataset = load_dataset("hellaswag", num_proc=num_proc_load_dataset)
+            testset = dataset["validation"]
+            q_func = lambda example: "Context" + example['ctx'] + " Options: " + ", ".join(example['endings']) + " Best Answer:"
+            a_func = lambda example: example['endings'][int(example['label'])]
+
 
         # we now want to tokenize the dataset. first define the encoding function (gpt2 bpe)
         def process(example):
@@ -154,15 +174,26 @@ class QADataset(Dataset):
         torch_a_ids = torch.tensor(a_ids, dtype=torch.int64) #shape: (a_seq_len,)
         x = torch.cat((torch_q_ids, torch_a_ids), dim=0)  # shape: (q_seq_len + a_seq_len,)
         y = F.pad(torch_a_ids, (len(torch_q_ids)-1, 0), value=self.ignore_index) # shape: (q_seq_len + a_seq_len - 1,).  Pad with -1 (ignore index) for the question part
+
+        if self.n_shot_prompt > 0:
+            prompt = []
+            for i in range(self.n_shot_prompt):
+                prompt.append(self.testset_token[idx-i-1]['q_ids'])
+                prompt.append(self.testset_token[idx-i-1]['a_ids'])
+            prompt = torch.tensor(np.concatenate(prompt), dtype=torch.int64)  # shape: (prompt_seq_len,)
+            x = torch.cat((prompt, x), dim=0)  # shape: (prompt_seq_len + q_seq_len + a_seq_len,)
+            y = F.pad(y, (len(prompt), 0), value=self.ignore_index)  # shape: (prompt_seq_len + q_seq_len + a_seq_len - 1,).  Pad with -1 (ignore index) for the question part
         # Ensure x and y are of the same length block size
-        if len(x) < self.block_size:
+        if len(x) <= self.block_size:
             padding_length = self.block_size - len(x)
             x = F.pad(x, (0, padding_length), value=x[-1])  # right pad x with last token (eos)
             y = F.pad(y, (0, padding_length+1), value=self.ignore_index)  # right pad y with -1 (ignore index)
         elif len(x) > self.block_size:
             x = x[-self.block_size:]
             y = y[-self.block_size:]
-        
+        if len(y) != self.block_size or len(x) != self.block_size:
+            print(f"Warning: Length mismatch for idx={idx}: prompt_len={len(prompt) if self.n_shot_prompt > 0 else 0}, {len(q_ids)=}, {len(a_ids)=}, block_size={self.block_size}")
+            raise ValueError(f"Length mismatch: x={len(x)}, y={len(y)}, block_size={self.block_size}")
         return x, y
 
 def load_model(model_path, ckpt_step, device='cuda', model_name='gpt2'):
@@ -291,6 +322,10 @@ def main():
                        help='File to save evaluation results')
     parser.add_argument('--wandb_id', type=str, default=None,
                        help='WandB run id for logging')
+    parser.add_argument('--n_shot_prompt', type=int, default=0,
+                       help='Number of n-shot examples to include in the prompt (default: 0)')
+    parser.add_argument('--num_proc_load_dataset', type=int, default=8,
+                       help='Number of processes to use for loading dataset (default: 8)')
     
     args = parser.parse_args()
     
@@ -322,14 +357,14 @@ def main():
 
     # Load dataset
     print(f"Loading dataset {args.dataset_name}")
-    dataset = QADataset(dataset_name=args.dataset_name, block_size=args.block_size, tokenizer_name=args.model_name)
+    dataset = QADataset(dataset_name=args.dataset_name, block_size=args.block_size, tokenizer_name=args.model_name, n_shot_prompt=args.n_shot_prompt, num_proc_load_dataset=args.num_proc_load_dataset)
 
 
     dataloader = DataLoader(
         dataset, 
         batch_size=args.batch_size, 
         shuffle=False, 
-        num_workers=8,
+        num_workers=args.num_proc_load_dataset,
         pin_memory=True if 'cuda' in args.device else False
     )
     
