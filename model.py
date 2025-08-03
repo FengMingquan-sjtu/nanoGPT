@@ -14,6 +14,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
@@ -412,7 +413,17 @@ def configure_AdamW_optimizer(model, weight_decay, learning_rate, betas, device_
     return optimizer
 
 
-def token_sort_rho(logits, targets, ref_model, idx, reverse_select, batch_select=False, scale_select=False, mask_select=0, value_select=False, ref_model_2=None, smooth_kernel_size=1):
+def get_model_name(model):
+    if hasattr(model, 'module'):
+        model = model.module
+
+    if hasattr(model, '_orig_mod'):
+        model = model._orig_mod
+    
+    return model.__class__.__name__
+
+
+def token_sort_rho(logits, targets, ref_model, idx, ratio, reverse_select=False, batch_select=False, scale_select=False, mask_select=0, value_select=False, ref_model_2=None, smooth_kernel_size=1, attn_select=False):
     ignore_idx = -1 # the index of the token to ignore in the targets
     b, t, vocab_size = logits.size()
     #logits shape (b, t, vocab_size), targets shape (b, t), token_loss shape (b*t)
@@ -420,59 +431,46 @@ def token_sort_rho(logits, targets, ref_model, idx, reverse_select, batch_select
     with torch.no_grad():
         token_loss = F.cross_entropy(logits.view(-1, vocab_size), targets.view(-1), ignore_index=ignore_idx, reduction='none')
         
-        if mask_select > 0:
-            attn_mask = torch.ones((1, 1, t, t), device=logits.device).tril(diagonal=0).triu(diagonal=-mask_select) # shape (1, 1, t, t)
-        elif mask_select < 0:
-            mask = torch.ones((1, 1, t, t), device=logits.device)
-            attn_mask = mask.tril(diagonal=0) + mask.triu(diagonal=-mask_select+1) # shape (1, 1, t, t)
-        else:
-            attn_mask = None
         
-        if not value_select:
-            ref_model.eval() # set the reference model to eval mode
-            #ref_logits, _ = ref_model(idx, targets, attn_mask)
-            ref_logits = ref_model(idx, labels=targets, attention_mask=attn_mask).logits
-            ref_token_loss = F.cross_entropy(ref_logits.view(-1, vocab_size), targets.view(-1), ignore_index=ignore_idx, reduction='none')
-
-        if scale_select:
-            diff_token_loss = token_loss / (ref_token_loss + 1e-8)
-        elif value_select:
-            diff_token_loss = token_loss
-        elif ref_model_2 is not None:
-            ref_model_2.eval() # set the second reference model to eval mode
-            #ref_logits_2, _ = ref_model_2(idx, targets, attn_mask)
-            ref_logits_2 = ref_model_2(idx, labels=targets, attention_mask=attn_mask).logits
-            ref_token_loss_2 = F.cross_entropy(ref_logits_2.view(-1, vocab_size), targets.view(-1), ignore_index=ignore_idx, reduction='none')
-            diff_token_loss = ref_token_loss_2 - ref_token_loss
+        ref_model.eval() # set the reference model to eval mode
+        if get_model_name(ref_model) == 'GPT':
+            ref_logits, _ = ref_model(idx, targets)
+        elif attn_select:
+            output = ref_model(idx, labels=targets, output_attentions=True)
+            ref_logits = output.logits
+            attn_weights = output.attentions[-5].mean(dim=1)  # average over all heads, shape (b, t, t)
         else:
-            diff_token_loss = token_loss - ref_token_loss # shape (b*t,)
-        #ignore_mask = (targets.view(-1) == ignore_idx)
-        #diff_token_loss = diff_token_loss.masked_fill(ignore_mask, -1e8) # ignore the -1 targets
+            ref_logits = ref_model(idx, labels=targets).logits
+        ref_token_loss = F.cross_entropy(ref_logits.view(-1, vocab_size), targets.view(-1), ignore_index=ignore_idx, reduction='none')
+        diff_token_loss = token_loss - ref_token_loss # shape (b*t,)
+        diff_token_loss = diff_token_loss.view(b, -1) # reshape to (b, t)
+        sorted_diff_loss = torch.sort(diff_token_loss, descending=not reverse_select, dim=1)
+        sorted_token_indices = sorted_diff_loss.indices #shape (b, t)
 
-        if smooth_kernel_size > 1:
-            # smooth the token loss by averaging over the neighbors
-            diff_token_loss = diff_token_loss.view(b, 1, t)
-            padding = smooth_kernel_size // 2
-            diff_token_loss = F.avg_pool1d(diff_token_loss, kernel_size=smooth_kernel_size, stride=1, padding=padding) # shape (b, 1, t)
-            diff_token_loss = diff_token_loss.view(-1) # reshape to (b*t,)
-            
-        
-        #sorted_token_indices = torch.topk(diff_token_loss, k=t, dim=1).indices #shape (b, n_tokens)
-        if batch_select:
-            sorted_diff_loss = torch.sort(diff_token_loss, descending=not reverse_select) # shape (b*t,)
-            sorted_token_indices = sorted_diff_loss.indices # shape (b*t)
-        else:
-            diff_token_loss = diff_token_loss.view(b, -1) # reshape to (b, t)
-            sorted_diff_loss = torch.sort(diff_token_loss, descending=not reverse_select, dim=1)
-            sorted_token_indices = sorted_diff_loss.indices #shape (b, t)
-            if value_select:
-                sorted_token_indices = sorted_token_indices[:, t//4: -t//4] # remove the top and bottom 1/8 of the tokens, to avoid the extreme values
-                # random selection of the tokens
-                #sorted_token_indices = torch.randperm(t, device=logits.device).view(1, -1).expand(b, -1) # shape (b, t)
+        if attn_select:
+            rho_scores = torch.zeros_like(sorted_token_indices) # shape (b, t)
+            # assign rho scores by indices
+            ranks = torch.empty_like(rho_scores, dtype=torch.long)
+            arange_t = torch.arange(t, device=rho_scores.device).expand(b, t)
+            ranks.scatter_(1, sorted_token_indices, arange_t)
+            ranks = ranks.float() # convert to float for division
+            ranks[ranks >= t * 0.5] = 0.0 # set the lower half to 0
+            ranks[ranks < t * 0.5] = 1.0 
+            attn_weights = attn_weights.transpose(1, 2) # shape (b, t, t)
+            ranked_attn_weights = torch.bmm(attn_weights, ranks.unsqueeze(-1)).squeeze() # shape (b, t)
+            #print(f"ranked_attn_weights shape: {ranked_attn_weights.shape}")
+            sorted_ranked_attn_weights = torch.sort(ranked_attn_weights, descending=not reverse_select, dim=1)
+            #print(f"sorted_ranked_attn_weights shape: {sorted_ranked_attn_weights.values.shape}")
+            sorted_ranked_attn_indices = sorted_ranked_attn_weights.indices # shape (b, t). the score of input tokens
+            sorted_ranked_attn_indices = sorted_ranked_attn_indices - 1  # shift the indices, so the score is of output tokens
+            sorted_ranked_attn_indices = sorted_ranked_attn_indices[sorted_ranked_attn_indices >= 0].reshape(b, -1) # shape (b, t)
+            #print(f"sorted_ranked_attn_indices shape: {sorted_ranked_attn_indices.shape}, sorted_token_indices shape: {sorted_token_indices.shape}")
+            n_tokens = int(ratio * t * 0.5)+1  # number of tokens to select, half rho-1, half attn
+            sorted_token_indices = torch.cat((sorted_token_indices[:,:n_tokens], sorted_ranked_attn_indices[:,:n_tokens]), dim=1) # shape (b, 2*t)
         return sorted_token_indices, diff_token_loss
 
 
-def get_loss_rho(logits, targets, ref_model=None, idx=None, ratio=0.5, reverse_select=False, batch_select=False, scale_select=False, mask_select=0, value_select=False, ref_model_2=None, smooth_kernel_size=1):
+def get_loss_rho(logits, targets, ref_model=None, idx=None, ratio=0.5, reverse_select=False, batch_select=False, scale_select=False, mask_select=0, value_select=False, ref_model_2=None, smooth_kernel_size=1, attn_select=False):
     """
     Calculate the loss given the logits and targets.
     If ref_model is provided, use it to calculate the reference logits for KL divergence.
@@ -485,7 +483,7 @@ def get_loss_rho(logits, targets, ref_model=None, idx=None, ratio=0.5, reverse_s
 
 
         
-        sorted_token_indices, _ = token_sort_rho(logits, targets, ref_model, idx, reverse_select, batch_select, scale_select, mask_select, value_select, ref_model_2, smooth_kernel_size)
+        sorted_token_indices, _ = token_sort_rho(logits, targets, ref_model, idx, ratio, reverse_select, batch_select, scale_select, mask_select, value_select, ref_model_2, smooth_kernel_size, attn_select)
         # gather the average loss for the top-k tokens
         ignore_mask = (targets.view(-1) == ignore_idx) # shape (b*t,)
         loss = token_loss.masked_fill(ignore_mask, 0.0)  #shape (b*t,)
@@ -501,22 +499,9 @@ def get_loss_rho(logits, targets, ref_model=None, idx=None, ratio=0.5, reverse_s
 
         else:
             loss = loss.reshape(b, -1) # shape (b, t) 
-            loss = loss.gather(1, sorted_token_indices) # shape (b, t)
-            #loss = loss.mean() # BUG: each sample in the batch may have different number of tokens, so we cannot average over the batch
-            # instead, we will average over the selected tokens, as below:
-            loss_accum = 0.0
-            n_tokens_accum = 0 
-            for i in range(b):
-                n_ignore = ignore_mask[i].sum().item() # number of ignored tokens in the sample
-                n_tokens = t - n_ignore # number of valid tokens in the sample
-                n_tokens = int(ratio * n_tokens) # number of tokens to select
-                if n_tokens > 0:
-                    loss_accum += loss[i][:n_tokens].sum() # sum the loss for the selected tokens, assume loss is sorted by diff_loss descendingly
-                    n_tokens_accum += n_tokens
-            if n_tokens_accum == 0:
-                loss = torch.tensor(0.0, device=logits.device)
-            else:
-                loss = loss_accum / n_tokens_accum # average over the selected tokens
+            n_tokens = int(ratio * t)  # number of tokens to select
+            loss = loss.gather(1, sorted_token_indices[:, :n_tokens]) # shape (b, t)
+            loss = loss.mean()
     else:
         # standard cross-entropy loss
         # reshape logits and targets to be of shape (b*t, vocab_size) and (b*t,)

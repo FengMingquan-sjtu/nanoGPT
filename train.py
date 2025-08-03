@@ -62,6 +62,7 @@ batch_select = False # if True, select tokens in batches, otherwise select token
 mask_select = 0 # if > 0, use attention mask to select tokens, otherwise use no mask.
 value_select = False # if True, use the value of the loss instead of the difference from the reference model.
 smooth_kernel_size = 1 # kernel size for smoothing the token loss, 1 means no smoothing
+attn_select = False # 
 # wandb logging
 wandb_log = False # disabled by default
 wandb_project = 'owt'
@@ -296,29 +297,28 @@ ref_model = None
 #    ref_model.eval()
 
 if len(ref_model_ckpt)>0 and mask_select==0:
-    ref_model = AutoModelForCausalLM.from_pretrained(ref_model_ckpt)
+    if "gpt2" in ref_model_ckpt:
+        if ref_model_ckpt.endswith('.pt'):
+            # resume training from a checkpoint.
+            ref_checkpoint = torch.load(ref_model_ckpt, map_location=device)
+            ref_model_args = ref_checkpoint['model_args']
+            # create the model
+            ref_gptconf = GPTConfig(**ref_model_args)
+            ref_model = GPT(ref_gptconf)
+            ref_state_dict = ref_checkpoint['model']
+            ref_model.load_ckp_state_dict(ref_state_dict)
+        else:
+            # load from a pretrained model
+            override_args = dict(dropout=dropout)
+            ref_model = GPT.from_pretrained(ref_model_ckpt, override_args)
+    else:
+        ref_model = AutoModelForCausalLM.from_pretrained(ref_model_ckpt)
     ref_model.to(device)
     ref_model.eval()
     print(f"Loaded reference model from {ref_model_ckpt}")
 
 ref_model_2 = None
-if len(ref_model_ckpt_2)>0:
-    print(f"Loading second reference model from {ref_model_ckpt_2}")
-    if ref_model_ckpt_2.endswith('.pt'):
-        # resume training from a checkpoint.
-        ref_checkpoint_2 = torch.load(ref_model_ckpt_2, map_location=device)
-        ref_model_args_2 = ref_checkpoint_2['model_args']
-        # create the model
-        ref_gptconf_2 = GPTConfig(**ref_model_args_2)
-        ref_model_2 = GPT(ref_gptconf_2)
-        ref_state_dict_2 = ref_checkpoint_2['model']
-        ref_model_2.load_ckp_state_dict(ref_state_dict_2)
-    else:
-        # load from a pretrained model
-        override_args_2 = dict(dropout=dropout)
-        ref_model_2 = GPT.from_pretrained(ref_model_ckpt_2, override_args_2)
-    ref_model_2.to(device)
-    ref_model_2.eval()
+
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
 scaler = torch.amp.GradScaler("cuda", enabled=(dtype == 'float16'))
@@ -470,7 +470,7 @@ while True:
             else:
                 logits = model(X).logits
             
-            loss = get_loss_rho(logits, Y, ref_model, X, token_keep_ratio, reverse_select, batch_select, scale_select, mask_select, value_select, ref_model_2, smooth_kernel_size)
+            loss = get_loss_rho(logits, Y, ref_model, X, token_keep_ratio, reverse_select, batch_select, scale_select, mask_select, value_select, ref_model_2, smooth_kernel_size, attn_select)
             #if len(clustering_ckpt)==0:
             #    loss = get_loss_rho(logits, Y, ref_model, X, token_keep_ratio, reverse_select, batch_select, scale_select, mask_select, value_select, ref_model_2, smooth_kernel_size)
             #else:
