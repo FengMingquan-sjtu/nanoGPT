@@ -68,7 +68,9 @@ wandb_log = False # disabled by default
 wandb_project = 'owt'
 wandb_run_name = 'gpt2' # 'run' + str(time.time())
 # data
-dataset = 'openwebtext'
+dataset = '/prodcpfs/user/fengmingquan/dataset/processed-qwen2' #root path to processed dataset
+dataset_prefix = "fineweb-edu,megamath,opc-ann" # prefixs of the dataset to use, separated by commas
+dataset_ratio = "50,25,25" # ratio of the dataset to use, separated by commas
 gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
 batch_size = 12 # if gradient_accumulation_steps > 1, this is the micro-batch size
 block_size = 1024
@@ -151,19 +153,26 @@ ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torc
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
 # poor man's data loader
-#data_dir = os.path.join('data', dataset)
-data_dir = dataset 
+data_dir = dataset
 def get_batch(split):
-    if "qwen2" in data_dir:
+    if "qwen2" in dataset:
         data_dtype = np.uint32
     else:
         data_dtype = np.uint16
+
+    dataset_freq = np.array([float(x.strip()) for x in dataset_ratio.split(',')])
+    dataset_idx = np.random.choice(len(dataset_freq), p=dataset_freq/dataset_freq.sum())
+    dataset_prefix_i = dataset_prefix.split(",")[dataset_idx]
+    datasubset_folders = [os.path.join(data_dir, f) for f in os.listdir(data_dir) if f.startswith(dataset_prefix_i)]
+    datasubset_freq = np.array([os.path.getsize(os.path.join(f, f'train.bin')) for f in datasubset_folders])
+    datasubset_idx = np.random.choice(len(datasubset_freq), p=datasubset_freq/datasubset_freq.sum())
+    datasubset_folder_i = datasubset_folders[datasubset_idx]
     # We recreate np.memmap every batch to avoid a memory leak, as per
     # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
     if split == 'train':
-        data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=data_dtype, mode='r')
+        data = np.memmap(os.path.join(datasubset_folder_i, 'train.bin'), dtype=data_dtype, mode='r')
     else:
-        data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=data_dtype, mode='r')
+        data = np.memmap(os.path.join(datasubset_folder_i, 'val.bin'), dtype=data_dtype, mode='r')
     ix = torch.randint(len(data) - block_size, (batch_size,))
     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
     y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
@@ -234,12 +243,9 @@ if "gpt" in init_from:
     
     # initialize from OpenAI GPT-2 weights
     override_args = dict(dropout=dropout)
-    if "kinet" in out_dir:
-        print(f"WARNING: Initializing KINETGPT from OpenAI GPT-2 weights: {init_from}")
-        model = KINetGPT.from_pretrained(init_from, override_args)
-    else:
-        print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
-        model = GPT.from_pretrained(init_from, override_args)
+    
+    print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
+    model = GPT.from_pretrained(init_from, override_args)
     # read off the created config params, so we can store them into checkpoint correctly
     for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
         model_args[k] = getattr(model.config, k)
