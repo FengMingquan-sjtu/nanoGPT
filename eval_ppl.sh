@@ -24,10 +24,10 @@
 #out/cont-kinetgpt2-0.7B-owt-15B
 #out/cont-kinetgpt2-1.5B-owt-15B
 
-model_path="out/cont-tinyllama-1.1B-wiki"
+model_path="out/cont-tinyllama-1.1B-tinypajama-0.6rho"
 model_name="auto"  # Specify the model name
 wandb_id="auto"  # Set to "auto" to automatically find the wandb ID from the log file
-gpu_id=3
+gpu_id=1
 batch_size=15  # Adjust batch size as needed
 block_size=2048  # Adjust block size as needed
 n_shot_prompt=5  # Number of n-shot examples to include in the prompt
@@ -37,10 +37,10 @@ n_processes=8
 checkpoints=(
     0 1000 2000 4000 6000 8000 10000
     12000 14000 16000 18000 20000
-    22000 24000 26000 28000 30000
+#    22000 24000 26000 28000 30000
 )
 datasets=(
-    "hellaswag"
+    "hellaswag" "arc_c" "arc_e" "math" "gsm8k" "ocw" "mathqa" "bbh" "gpqa"
 )
 # math gsm8k ocw mathqa    bbh gpqa
 # arc_c arc_e hellaswag

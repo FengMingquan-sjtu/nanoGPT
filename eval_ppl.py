@@ -235,7 +235,8 @@ def load_model(model_path, ckpt_step, device='cuda', model_name='gpt2'):
             checkpoint = torch.load(model_fname, map_location=device)
             state_dict = checkpoint['model']
             state_dict = remove_prefix_from_state_dict(state_dict)
-            model = AutoModelForCausalLM.from_pretrained(model_name, state_dict=state_dict)
+            model = AutoModelForCausalLM.from_pretrained(model_name)
+            model.load_state_dict(state_dict, strict=True)
             print(f"Loaded checkpoint")
         else:
             print(f"Loading pretrained model {model_name}")
@@ -300,6 +301,34 @@ def evaluate_perplexity(model, dataloader, device='cuda', max_batches=None, mode
     
     return perplexity, avg_loss, total_tokens
 
+
+def auto_parse_path(args):
+    if not os.path.basename(args.model_path).startswith("20"):
+        # Find the latest folder starting with '20' (e.g. 2025-07-28_22-41-45)
+        folders = [f for f in os.listdir(args.model_path) if os.path.isdir(os.path.join(args.model_path, f)) and f.startswith('20')]
+        args.model_path = os.path.join(args.model_path, sorted(folders)[-1])
+        print(f"Auto-detected latest folder: {args.model_path}")
+        
+    if args.model_name == "auto":
+        logfile = os.path.join(args.model_path, "out.log")
+        with open(logfile, 'r') as f:
+            for line in f:
+                if "configs are: " in line:
+                    configs = line.split("configs are: ")[-1].strip()
+                    configs = ast.literal_eval(configs)
+                    args.model_name = configs.get('init_from', 'gpt2')
+                    break
+        print(f"Auto-detected model name: {args.model_name}")
+    if args.wandb_id == "auto":
+        logfile = os.path.join(args.model_path, "out.log")
+        with open(logfile, 'r') as f:
+            for line in f:
+                if "wandb:" in line and "/runs/" in line:
+                    args.wandb_id = line.split("/runs/")[-1].strip()
+                    break
+        print(f"Auto-detected WandB ID: {args.wandb_id}")
+    return args
+
 def main():
     parser = argparse.ArgumentParser(description='Evaluate model perplexity on benchmark datasets')
     parser.add_argument('--model_path', type=str, required=True, 
@@ -329,30 +358,7 @@ def main():
     
     args = parser.parse_args()
     
-    if not os.path.basename(args.model_path).startswith("20"):
-        # Find the latest folder starting with '20' (e.g. 2025-07-28_22-41-45)
-        folders = [f for f in os.listdir(args.model_path) if os.path.isdir(os.path.join(args.model_path, f)) and f.startswith('20')]
-        args.model_path = os.path.join(args.model_path, sorted(folders)[-1])
-        print(f"Auto-detected latest folder: {args.model_path}")
-        
-    if args.model_name == "auto":
-        logfile = os.path.join(args.model_path, "out.log")
-        with open(logfile, 'r') as f:
-            for line in f:
-                if "configs are: " in line:
-                    configs = line.split("configs are: ")[-1].strip()
-                    configs = ast.literal_eval(configs)
-                    args.model_name = configs.get('init_from', 'gpt2')
-                    break
-        print(f"Auto-detected model name: {args.model_name}")
-    if args.wandb_id == "auto":
-        logfile = os.path.join(args.model_path, "out.log")
-        with open(logfile, 'r') as f:
-            for line in f:
-                if "wandb:" in line and "/runs/" in line:
-                    args.wandb_id = line.split("/runs/")[-1].strip()
-                    break
-        print(f"Auto-detected WandB ID: {args.wandb_id}")
+    args = auto_parse_path(args)
     
 
     # Load dataset
