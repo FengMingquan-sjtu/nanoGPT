@@ -13,4 +13,8 @@ venv/
 log/
 wandb/
 out/
+out-prodcpfs
 *.out
+tmp.*
+test.ipynb
+hf_key.txt
