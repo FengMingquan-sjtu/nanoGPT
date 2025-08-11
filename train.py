@@ -153,15 +153,17 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 
 # poor man's data loader
 data_dir = dataset
-def get_batch(split):
+def get_batch(split, dataset_ratio_i=None):
     if "qwen2" in dataset:
         data_dtype = np.uint32
     else:
         data_dtype = np.uint16
 
+    if dataset_ratio_i is None:
+        dataset_ratio_i = dataset_ratio #default to the full dataset ratio
     x_, y_ = [], []
     for i in range(batch_size):
-        dataset_freq = np.array([float(x.strip()) for x in dataset_ratio.split(',')])
+        dataset_freq = np.array([float(x.strip()) for x in dataset_ratio_i.split(',')])
         dataset_idx = np.random.choice(len(dataset_freq), p=dataset_freq/dataset_freq.sum())
         dataset_prefix_i = dataset_prefix.split(",")[dataset_idx]
         datasubset_folders = [os.path.join(data_dir, f) for f in os.listdir(data_dir) if f.startswith(dataset_prefix_i)]
@@ -229,7 +231,6 @@ model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=bloc
 #    state_dict = checkpoint['model']
 #    model.load_ckp_state_dict(state_dict)
 #    iter_num = checkpoint['iter_num']
-#    best_val_loss = checkpoint['best_val_loss']
 #elif init_from.startswith('gpt2'):
 #    print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
 #    # initialize from OpenAI GPT-2 weights
@@ -281,7 +282,6 @@ else:
         state_dict = remove_prefix_from_state_dict(state_dict)
         model.load_state_dict(state_dict)
         iter_num = checkpoint['iter_num']
-        best_val_loss = checkpoint['best_val_loss']
 model.to(device)
 
 
@@ -387,17 +387,23 @@ def estimate_loss():
     out = {}
     model.eval()
     for split in ['train', 'val']:
-        losses = torch.zeros(eval_iters)
-        for k in range(eval_iters):
-            X, Y = get_batch(split)
-            with ctx:
-                if init_from.startswith('gpt2'):
-                    logits, loss = model(X, Y)
-                else:
-                    logits = model(X).logits
-                    loss = F.cross_entropy(logits.view(-1, logits.size(-1)), Y.view(-1), reduction='mean')
-            losses[k] = loss.item()
-        out[split] = losses.mean()
+        out[split] = []
+        n_data_sources = len(dataset_ratio.split(','))
+        for i in range(n_data_sources):
+            dataset_ratio_i = [0] * n_data_sources
+            dataset_ratio_i[i] = 1
+            dataset_ratio_i = ','.join([str(x) for x in dataset_ratio_i])
+            losses = torch.zeros(eval_iters)
+            for k in range(eval_iters):
+                X, Y = get_batch(split, dataset_ratio_i)
+                with ctx:
+                    if init_from.startswith('gpt2'):
+                        logits, loss = model(X, Y)
+                    else:
+                        logits = model(X).logits
+                        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), Y.view(-1), reduction='mean')
+                losses[k] = loss.item()
+            out[split].append(losses.mean())
     model.train()
     return out
 
@@ -441,27 +447,26 @@ while True:
     # evaluate the loss on train/val sets and write checkpoints
     if (iter_num % eval_interval == 0 or iter_num==eval_interval//2) and master_process:
         losses = estimate_loss()
-        print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        log_dict = {"lr": lr, "mfu": running_mfu*100,}
+        for i, dataset_prefix_i in enumerate(dataset_prefix.split(',')):
+            log_dict[f"train/loss-{dataset_prefix_i}"] = losses['train'][i]
+            log_dict[f"val/loss-{dataset_prefix_i}"] = losses['val'][i]
         if wandb_log:
-            wandb.log({
-                "train/loss": losses['train'],
-                "val/loss": losses['val'],
-                "lr": lr,
-                "mfu": running_mfu*100, # convert to percentage
-            }, step=iter_num)
-        if losses['val'] < best_val_loss or always_save_checkpoint:
-            best_val_loss = losses['val']
-            if iter_num > 0:
-                checkpoint = {
-                    'model': raw_model.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'model_args': model_args,
-                    'iter_num': iter_num,
-                    'best_val_loss': best_val_loss,
-                    'config': config,
-                }
-                print(f"saving checkpoint to {out_folder}")
-                torch.save(checkpoint, os.path.join(out_folder, f'ckpt-{iter_num}.pt'))
+            wandb.log(log_dict, step=iter_num)
+        print(f"step {iter_num}:", "train loss:", [f"{x:.4f}" for x in losses['train']],
+              "val loss:", [f"{x:.4f}" for x in losses['val']], flush=True)
+
+
+        if iter_num > 0:
+            checkpoint = {
+                'model': raw_model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'model_args': model_args,
+                'iter_num': iter_num,
+                'config': config,
+            }
+            print(f"saving checkpoint to {out_folder}")
+            torch.save(checkpoint, os.path.join(out_folder, f'ckpt-{iter_num}.pt'))
     if iter_num == 0 and eval_only:
         break
 
