@@ -25,23 +25,18 @@ import huggingface_hub
 from transformers import AutoTokenizer
 from transformers import AutoModelForCausalLM
 from lm_eval import evaluator
-from lm_eval.models.huggingface import HFLM
 
-from model import GPTConfig, GPT, remove_prefix_from_state_dict
-from model_kinet import KINetGPT
+
 from eval_ppl import load_model, auto_parse_path
 
 
 os.environ["WANDB_API_KEY"] = "b7f26328382adc825eb193aac3f30f07e7da99c1" 
-
-def save_to_tmp_hf_folder(model, tokenizer, folder_name):
-    ram_disk_path = os.path.join("/dev/shm/", folder_name)
-    if not os.path.exists(ram_disk_path):
-        os.makedirs(ram_disk_path)
-    model.save_pretrained(ram_disk_path)
-    tokenizer.save_pretrained(ram_disk_path)
-    print(f"Model and tokenizer copied to {ram_disk_path}")
-    return ram_disk_path
+os.environ["HF_ALLOW_CODE_EVAL"] = "1"
+os.environ["TOKENIZERS_PARALLELISM"] = "true"
+key_file = "/cpfs/user/fengmingquan/nanoGPT/hf_key.txt"
+with open(key_file, 'r') as f:
+    hf_key = f.read().strip()
+huggingface_hub.login(token=hf_key)
 
 def main():
     parser = argparse.ArgumentParser(description='Evaluate model perplexity on benchmark datasets')
@@ -59,8 +54,8 @@ def main():
                        help='Sequence length')
     parser.add_argument('--device', type=str, default='cuda',
                        help='Device to use for evaluation')
-    parser.add_argument('--max_batches', type=int, default=None,
-                       help='Maximum number of batches to evaluate (for quick testing)')
+    parser.add_argument('--limit', type=int, default=None,
+                       help='Maximum number of samples to evaluate (for quick testing)')
     parser.add_argument('--output_file', type=str, default=None,
                        help='File to save evaluation results')
     parser.add_argument('--wandb_id', type=str, default=None,
@@ -69,30 +64,56 @@ def main():
                        help='Number of n-shot examples to include in the prompt (default: 0)')
     parser.add_argument('--num_proc_load_dataset', type=int, default=8,
                        help='Number of processes to use for loading dataset (default: 8)')
-    
+    parser.add_argument('--backend', type=str, default="hflm",
+                       help='Backend to use for evaluation (default: hflm), use vllm for faster evaluation')
+
     args = parser.parse_args()
     args = auto_parse_path(args)
 
-    # Load model
-    model = load_model(args.model_path, args.ckpt_step, args.device, args.model_name)
-    
-    # Load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    hf_model_path = os.path.join(args.model_path, f"ckpt-{args.ckpt_step}-hf")
 
-    #ram_disk_path = save_to_tmp_hf_folder(model, tokenizer, f"{args.model_path}_{args.dataset_name}_{args.ckpt_step}")
+    if args.backend == "hflm":
+        from lm_eval.models.huggingface import HFLM
 
-    # Evaluate accuracy
-    print("Starting evaluation...")
-    results = evaluator.simple_evaluate(
-        model=HFLM(pretrained=model, tokenizer=tokenizer),
-        tasks=args.dataset_name.split(','),
-        num_fewshot=args.n_shot_prompt,
-        batch_size=args.batch_size,
-        limit=int(args.max_batches * args.batch_size) if args.max_batches else None,
-        verbosity="WARNING",
-    )
+        #model = load_model(args.model_path, args.ckpt_step, args.device, args.model_name)
+        #tokenizer = AutoTokenizer.from_pretrained(args.model_name)
 
-    
+        # Evaluate accuracy
+        print("Starting HFLM evaluation...")
+        #print("Waring: set No Bootstrap for GPT2 !!!!")
+        results = evaluator.simple_evaluate(
+            model=HFLM(pretrained=hf_model_path, tokenizer=hf_model_path, device=args.device),
+            tasks=args.dataset_name.split(','),
+            num_fewshot=args.n_shot_prompt,
+            batch_size=args.batch_size if args.batch_size > 0 else "auto",  # Use 0 for automatic batch size
+            limit=args.limit,
+            verbosity="WARNING",
+            #bootstrap_iters=0,  # Disable bootstrap iterations
+            confirm_run_unsafe_code=True
+        )
+
+    elif args.backend == "vllm":
+        from lm_eval.models.vllm_causallms import VLLM
+        # NOTE: install vllm from source, with pre_compiled 
+
+        
+        results = evaluator.simple_evaluate(
+            model=VLLM(
+                pretrained=hf_model_path,  # Path to the model or model name
+                tensor_parallel_size=1,  #
+                gpu_memory_utilization=0.8, # 0.9 will cause OOM
+                trust_remote_code=True,
+                dtype="auto",
+            ),
+            tasks=args.dataset_name.split(','),
+            num_fewshot=args.n_shot_prompt,
+            batch_size=args.batch_size if args.batch_size > 0 else "auto",  # Use 0 for automatic batch size
+            limit=args.limit,
+            verbosity="WARNING",
+            confirm_run_unsafe_code=True
+        )
+    else:
+        raise ValueError(f"Unsupported backend: {args.backend}. Choose from 'hflm' or 'vllm'.")
     
     # Print results
     print("\n" + "="*50)
@@ -115,9 +136,13 @@ def main():
         print(f"Results saved to {args.output_file}")
     
     if args.wandb_id:
-        wandb.init(id=args.wandb_id, resume='must', project="owm", tags=[f"block_size_{args.block_size}", f"vocab_size_{model.config.vocab_size}"])
+        wandb.init(id=args.wandb_id, resume='must', project="owm")
         for dataset_name, dataset_res in results['results'].items():
+            if not dataset_name in args.dataset_name.split(','):
+                continue
             for key, value in dataset_res.items():
+                if key == "alias":
+                    continue
                 wandb.define_metric(f"{dataset_name}/{key}", step_metric="train_step")
                 wandb.log({
                     f'{dataset_name}/{key}': value,
@@ -126,10 +151,6 @@ def main():
         wandb.finish()
         print(f"Results logged to WandB run {args.wandb_id}")
     
-
-    # NOTE: Clean up temporary files
-    #if os.path.exists(ram_disk_path):
-    #    shutil.rmtree(ram_disk_path)
     
 
 if __name__ == '__main__':

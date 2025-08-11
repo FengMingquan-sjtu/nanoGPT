@@ -66,7 +66,7 @@ def main(input_path, output_path):
             print(f"Using uint64 for vocab size {max_token_id}")
         
         arr = np.memmap(filename, dtype=dtype, mode='w+', shape=(arr_len,))
-        total_batches = 512
+        total_batches = 1024
         
         idx = 0
         for batch_idx in tqdm(range(total_batches), desc=f'writing {filename}'):
@@ -85,11 +85,13 @@ def main(input_path, output_path):
     print(f"\n# To read the bin files later, use the same dtype ({dtype}):")
     print(f"# m = np.memmap('train.bin', dtype=np.{dtype.__name__}, mode='r')")
 
-# nohup /cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/python data/opc-ann/prepare_hf.py > log/prepare_hf_2.log 2>&1 &
+# nohup /cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/python data/opc-ann/prepare_hf.py > log/prepare_hf_8.log 2>&1 &
 
 # processed-qwen2/opc-ann-algorithmic_corpus/train.bin with 10592228 samples and 4.27B tokens. 
 # processed-qwen2/opc-ann-syn/train.bin with 8399952 samples and 2.15B tokens.
 
+#processed-gpt2/fineweb-edu/train.bin with 9667264 samples and 9949090029 tokens.
+#processed-gpt2/opc-ann-algorithmic_corpus/train.bin with 10592228 samples and 8213804685 tokens.
 
 if __name__ == '__main__':
     # number of workers in .map() call
@@ -104,7 +106,7 @@ if __name__ == '__main__':
 
     # modify these variables as needed
     tokenizer_name = "gpt2" # or qwen2, etc.
-    dataset_prefix = "megamath"  # modify to dataset prefix: opc-ann, fineweb-edu, megamath
+    dataset_prefix = "megamath-qa"  # modify to dataset prefix: opc-ann, fineweb-edu, megamath
     input_root = "/prodcpfs/user/fengmingquan/dataset/raw/"
     output_root = "/prodcpfs/user/fengmingquan/dataset/processed-" + tokenizer_name  
     

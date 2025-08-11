@@ -25,7 +25,6 @@ from transformers import AutoTokenizer
 from transformers import AutoModelForCausalLM
 
 from model import GPTConfig, GPT, remove_prefix_from_state_dict
-from model_kinet import KINetGPT
 
 
 os.environ["WANDB_API_KEY"] = "b7f26328382adc825eb193aac3f30f07e7da99c1" 

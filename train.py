@@ -32,12 +32,11 @@ import torch.nn.functional as F
 from model import GPTConfig, GPT
 from model import get_loss_rho, get_loss_cls_rho, remove_prefix_from_state_dict
 from model import configure_AdamW_optimizer
-from model_kinet import KINetGPT
 from token_cluster import TokenClusteringAnalyzer, GPTFeatureExtractor
 
 os.environ["WANDB_API_KEY"] = "b7f26328382adc825eb193aac3f30f07e7da99c1" # set your wandb api key here
 rank = int(os.environ.get('RANK', 0))
-os.environ['TRITON_CACHE_DIR'] = f'/prodcpfs/user/fengmingquan/triton_cache/rank_{rank}'
+#os.environ['TRITON_CACHE_DIR'] = f'/prodcpfs/user/fengmingquan/triton_cache/rank_{rank}'
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # rho algorithm
@@ -160,22 +159,28 @@ def get_batch(split):
     else:
         data_dtype = np.uint16
 
-    dataset_freq = np.array([float(x.strip()) for x in dataset_ratio.split(',')])
-    dataset_idx = np.random.choice(len(dataset_freq), p=dataset_freq/dataset_freq.sum())
-    dataset_prefix_i = dataset_prefix.split(",")[dataset_idx]
-    datasubset_folders = [os.path.join(data_dir, f) for f in os.listdir(data_dir) if f.startswith(dataset_prefix_i)]
-    datasubset_freq = np.array([os.path.getsize(os.path.join(f, f'train.bin')) for f in datasubset_folders])
-    datasubset_idx = np.random.choice(len(datasubset_freq), p=datasubset_freq/datasubset_freq.sum())
-    datasubset_folder_i = datasubset_folders[datasubset_idx]
-    # We recreate np.memmap every batch to avoid a memory leak, as per
-    # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
-    if split == 'train':
-        data = np.memmap(os.path.join(datasubset_folder_i, 'train.bin'), dtype=data_dtype, mode='r')
-    else:
-        data = np.memmap(os.path.join(datasubset_folder_i, 'val.bin'), dtype=data_dtype, mode='r')
-    ix = torch.randint(len(data) - block_size, (batch_size,))
-    x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
-    y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
+    x_, y_ = [], []
+    for i in range(batch_size):
+        dataset_freq = np.array([float(x.strip()) for x in dataset_ratio.split(',')])
+        dataset_idx = np.random.choice(len(dataset_freq), p=dataset_freq/dataset_freq.sum())
+        dataset_prefix_i = dataset_prefix.split(",")[dataset_idx]
+        datasubset_folders = [os.path.join(data_dir, f) for f in os.listdir(data_dir) if f.startswith(dataset_prefix_i)]
+        datasubset_freq = np.array([os.path.getsize(os.path.join(f, f'train.bin')) for f in datasubset_folders])
+        datasubset_idx = np.random.choice(len(datasubset_freq), p=datasubset_freq/datasubset_freq.sum())
+        datasubset_folder_i = datasubset_folders[datasubset_idx]
+        # We recreate np.memmap every batch to avoid a memory leak, as per
+        # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
+        if split == 'train':
+            data = np.memmap(os.path.join(datasubset_folder_i, 'train.bin'), dtype=data_dtype, mode='r')
+        else:
+            data = np.memmap(os.path.join(datasubset_folder_i, 'val.bin'), dtype=data_dtype, mode='r')
+        ix = torch.randint(len(data) - block_size, (1,))
+        x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
+        y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
+        x_.append(x)
+        y_.append(y)
+    x = torch.cat(x_, dim=0)
+    y = torch.cat(y_, dim=0)
     if device_type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
