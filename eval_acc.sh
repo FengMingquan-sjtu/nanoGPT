@@ -9,7 +9,7 @@
 # pkill -f VLLM
 # fuser -v /dev/nvidia*
 
-model_path="out-prodcpfs/cont-qwen2-0.5B-finewebedu-0.8rho"  # Path to the model directory
+model_path="out-prodcpfs/cont-qwen2-1.5B-finewebedu-0.8rho-3Bref"  # Path to the model directory
 model_name="auto"  # Specify the model name
 wandb_id="auto"  # Set to "auto" to automatically find the wandb ID from the log file
 batch_size=0  # Adjust batch size as needed, 0 for automatic selection
@@ -21,15 +21,16 @@ device="cuda"
 python_path="/cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/python"
 gpu_id=7
 checkpoints=(
+    4000
 #    0 1000 2000
 #    4000 6000 8000
 #    10000 12000 14000
-    20000 18000 16000
+#    20000 18000 16000
 )
 datasets=(
     #"mmlu,mmlu_pro,arc_challenge,gpqa_main_n_shot,hellaswag,winogrande,mbpp"
     #"drop,humaneval,hendrycks_math,gsm8k"
-    "mmlu,mmlu_pro,arc_challenge,gpqa_main_n_shot,hellaswag,winogrande,mbpp,drop,humaneval,hendrycks_math,gsm8k"
+    "mmlu,mmlu_pro,arc_challenge,gpqa_main_n_shot,hellaswag,winogrande,mbpp,humaneval,gsm8k"
 )
 # mmlu,mmlu_pro,arc_challenge,arc_easy,gpqa_main_n_shot
 # hellaswag,winogrande,mbpp

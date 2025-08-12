@@ -36,7 +36,7 @@ min_lr = 6e-5 * 0.1 # final learning rate should be 0.1 * base learning rate
 # eval stuff
 eval_interval = 2000  # frequency of eval and save.
 eval_iters = 200   #loss estimation window size
-log_interval = 100 # frequency of printing training status
+log_interval = 10 # frequency of printing training status
 
 # weight decay
 weight_decay = 1e-1

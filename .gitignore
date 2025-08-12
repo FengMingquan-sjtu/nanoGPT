@@ -18,3 +18,5 @@ out-prodcpfs
 tmp.*
 test.ipynb
 hf_key.txt
+*.json
+deepspeed_config.json

@@ -10,6 +10,8 @@ import json
 from contextlib import nullcontext
 import ast
 import shutil
+import multiprocessing
+multiprocessing.set_start_method('spawn', force=True)
 
 import wandb
 import numpy as np
@@ -33,6 +35,8 @@ from eval_ppl import load_model, auto_parse_path
 os.environ["WANDB_API_KEY"] = "b7f26328382adc825eb193aac3f30f07e7da99c1" 
 os.environ["HF_ALLOW_CODE_EVAL"] = "1"
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
+os.environ['VLLM_ENABLE_V1_MULTIPROCESSING'] = '0'
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 key_file = "/cpfs/user/fengmingquan/nanoGPT/hf_key.txt"
 with open(key_file, 'r') as f:
     hf_key = f.read().strip()
@@ -104,6 +108,8 @@ def main():
                 gpu_memory_utilization=0.8, # 0.9 will cause OOM
                 trust_remote_code=True,
                 dtype="auto",
+                data_parallel_size=torch.cuda.device_count(),
+                max_model_len=args.block_size,
             ),
             tasks=args.dataset_name.split(','),
             num_fewshot=args.n_shot_prompt,

@@ -231,7 +231,7 @@ def load_model(model_path, ckpt_step, device='cuda', model_name='gpt2'):
         if ckpt_step > 0:
             model_fname = os.path.join(model_path, f'ckpt-{ckpt_step}.pt')
             print(f"Loading model from {model_fname}")
-            checkpoint = torch.load(model_fname, map_location=device)
+            checkpoint = torch.load(model_fname, map_location=device, weights_only=False)
             state_dict = checkpoint['model']
             state_dict = remove_prefix_from_state_dict(state_dict)
             model = AutoModelForCausalLM.from_pretrained(model_name)
