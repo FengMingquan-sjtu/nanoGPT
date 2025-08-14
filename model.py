@@ -434,13 +434,13 @@ def token_sort_rho(logits, targets, ref_model, idx, ratio, reverse_select=False,
         
         ref_model.eval() # set the reference model to eval mode
         if get_model_name(ref_model) == 'GPT':
-            ref_logits, _ = ref_model(idx, targets)
+            ref_logits, _ = ref_model(idx)
         elif attn_select:
-            output = ref_model(idx, labels=targets, output_attentions=True)
+            output = ref_model(idx, output_attentions=True)
             ref_logits = output.logits
             attn_weights = output.attentions[-5].mean(dim=1)  # average over all heads, shape (b, t, t)
         else:
-            ref_logits = ref_model(idx, labels=targets).logits
+            ref_logits = ref_model(idx).logits
         ref_token_loss = F.cross_entropy(ref_logits.view(-1, vocab_size), targets.view(-1), ignore_index=ignore_idx, reduction='none')
         diff_token_loss = token_loss - ref_token_loss # shape (b*t,)
         diff_token_loss = diff_token_loss.view(b, -1) # reshape to (b, t)

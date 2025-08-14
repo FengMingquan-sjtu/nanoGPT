@@ -1,5 +1,5 @@
 # fuser -v /dev/nvidia*
-# pkill -f python
+# pkill -f python3.13
 # pkill -f train.py
 
 
