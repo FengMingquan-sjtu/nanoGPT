@@ -33,7 +33,7 @@ import torch.nn.functional as F
 from model import GPTConfig, GPT
 from model import get_loss_rho, get_loss_cls_rho, remove_prefix_from_state_dict
 from model import configure_AdamW_optimizer
-from token_cluster import TokenClusteringAnalyzer, GPTFeatureExtractor
+
 
 os.environ["WANDB_API_KEY"] = "b7f26328382adc825eb193aac3f30f07e7da99c1" # set your wandb api key here
 os.environ['NCCL_TIMEOUT'] = '1800'  # 30分钟超时
@@ -574,9 +574,7 @@ if mask_select != 0:
 # cluster analyzer
 cluster_analyzer = None
 feature_extractor = None
-if len(clustering_ckpt)>0 and ref_model is not None:
-    cluster_analyzer = TokenClusteringAnalyzer.load_state(clustering_ckpt) # load scalar+pca+kmeans cluster model.
-    feature_extractor = GPTFeatureExtractor(ref_model)  #register forward hook on ref_model
+
 
 # helps estimate an arbitrarily accurate loss over either split using many batches
 @torch.no_grad()
