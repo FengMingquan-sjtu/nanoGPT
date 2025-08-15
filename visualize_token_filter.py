@@ -75,9 +75,9 @@ def select_tokens(sorted_token_indices: torch.Tensor, t: int, ratio: Optional[fl
     return mask
 
 
-def render_html(ori_text, token_pieces: List[str], selected_mask: List[bool], noise_mask: List[bool]) -> str:
+def render_html(token_pieces: List[str], selected_mask: List[bool], noise_mask: List[bool]) -> str:
     """Render an HTML string where filtered tokens (not selected) are blue, noise is underlined."""
-    html_parts = [
+    html_head = [
         "<html><head><meta charset='utf-8'><style>",
         "body{font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;}",
         ".tok{white-space:pre-wrap;}",
@@ -86,18 +86,19 @@ def render_html(ori_text, token_pieces: List[str], selected_mask: List[bool], no
         ".legend{margin-bottom:12px;}",
         "</style></head><body>",
         "<div class='legend'>",
-        "<span class='tok'>第一行</span>: 加噪前的文本； ",
-        "<span class='filtered'>蓝色</span>: 被筛掉的token； ",
-        "<span class='noise'>下划线</span>: 注入的噪声token",
+        #"<span class='tok'>第一行</span>: 原始文本； ",
+        "<span class='filtered'>蓝色</span>: 被选中的token; ",
+        #"<span class='noise'>下划线</span>: 注入的噪声token",
         "</div><div>"
     ]
     # Add original text as the first line
-    ori_text = ori_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    html_parts.append(f"<span class='tok'>{ori_text}</span><br>")
+    #ori_text = ori_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    #html_parts.append(f"<span class='tok'>{ori_text}</span><br>")
+    html_parts = []
 
     for i, piece in enumerate(token_pieces):
         classes = ["tok"]
-        if not selected_mask[i]:
+        if selected_mask[i]:
             classes.append("filtered")
         if noise_mask[i]:
             classes.append("noise")
@@ -109,36 +110,26 @@ def render_html(ori_text, token_pieces: List[str], selected_mask: List[bool], no
                       .replace(">", "&gt;") )
         html_parts.append(f"<span class='{cls}'>{safe_piece}</span>")
 
-    html_parts.append("</div></body></html>")
-    return "".join(html_parts)
+    html_tail = ["</div></body></html>"]
+    html_head = "".join(html_head)
+    html_tail = "".join(html_tail)
+    html_parts = "".join(html_parts)
+
+    return html_head, html_parts, html_tail
 
 
-def compute_metrics(selected_mask: List[bool], noise_mask: List[bool]):
 
 
-    assert len(selected_mask) == len(noise_mask)
-    filtered = [not s for s in selected_mask]
-
-    tp = sum(1 for f, n in zip(filtered, noise_mask) if f and n)  # noise filtered
-    fn = sum(1 for f, n in zip(filtered, noise_mask) if (not f) and n)  # noise kept
-    fp = sum(1 for f, n in zip(filtered, noise_mask) if f and (not n))  # clean filtered
-    tn = sum(1 for f, n in zip(filtered, noise_mask) if (not f) and (not n))  # clean kept
-
-    prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-    rec = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-    f1 = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
-
-    return dict(tp=tp, fn=fn, fp=fp, tn=tn, precision=prec, recall=rec, f1=f1)
-
-# usage: /cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/python visualize_token_filter.py --text "To critically evaluate instruction-tuned models, we adopt a multifaceted approach. Foundational skills and human preferences are assessed using open datasets and benchmarks. Additionally, our detailed in-house evaluations delve deeper into the models’competencies in key areas and multilingualism. A particular focus is placed on assessing long-context capability. The subsequent sections outline the evaluation methods and present the results." --model /prodcpfs/user/fengmingquan/model/Qwen2-0.5B --ref /prodcpfs/user/fengmingquan/model/Qwen2-1.5B --ratio 0.7 --noise_ratio 0.05 --output token_filter_vis.html
+# usage: /cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/python visualize_token_filter.py --text_file train_examples.txt --model /prodcpfs/user/fengmingquan/model/Qwen2-0.5B --ref /prodcpfs/user/fengmingquan/model/Qwen2-0.5B-Instruct --ratio 0.6 --noise_ratio 0.0 --output token_filter_vis.html
+# /cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/python visualize_token_filter.py --text_file train_examples.txt --model /prodcpfs/user/fengmingquan/model/Qwen2-1.5B --ref /prodcpfs/user/fengmingquan/model/Qwen2-1.5B-Instruct --ratio 0.6 --noise_ratio 0.0 --output token_filter_vis.html
 def main():
     parser = argparse.ArgumentParser(description="Visualize token filtering (rho-1) with noise injection.")
-    parser.add_argument("--text", type=str, default="The quick brown fox jumps over the lazy dog.", help="Clean input text")
+    parser.add_argument("--text_file", type=str, default=None, help="File containing text to visualize (one line)")
     parser.add_argument("--model", type=str, required=True, help="Path to NanoGPT ckpt .pt or HF model id/path for the main model")
     parser.add_argument("--ref", type=str, required=True, help="Reference model path/id (HF or NanoGPT .pt). Default: gpt2")
     parser.add_argument("--ratio", type=float, default=0.8, help="Selection ratio (0-1). Use with --top_k mutually exclusive")
     parser.add_argument("--top_k", type=int, default=None, help="Select fixed top-K tokens (mutually exclusive with --ratio)")
-    parser.add_argument("--noise_ratio", type=float, default=0.1, help="Probability of replacing each token with random noise")
+    parser.add_argument("--noise_ratio", type=float, default=0.0, help="Probability of replacing each token with random noise")
     parser.add_argument("--output", type=str, default="token_filter_vis.html", help="Output HTML path")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default=None, choices=[None, "cpu", "cuda"], help="Override device")
@@ -157,65 +148,70 @@ def main():
 
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
 
-    noisy_ids, noise_mask = build_inputs_from_text(tokenizer, args.text, args.noise_ratio, tokenizer.vocab_size, seed=args.seed)
+    
+    with open(args.text_file, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    
 
-    # Truncate to model block_size if NanoGPT; HF models can often handle longer but keep it simple
-    max_len = len(noisy_ids)
-    noisy_ids = noisy_ids[:max_len]
-    noise_mask = noise_mask[:max_len]
+    html_parts_lst = []
+    
+    for line in lines:
+        text = line.strip()
+        if not text:
+            continue
+    
 
-    # Prepare tensors
-    input_ids = torch.tensor(noisy_ids, dtype=torch.long, device=device).unsqueeze(0)  # (1, T)
-    # build next-token targets; last target is ignore index (-1) expected by NanoGPT token_sort_rho path
-    targets = input_ids.clone()
-    targets[:, :-1] = input_ids[:, 1:]
-    targets[:, -1] = -1
+        noisy_ids, noise_mask = build_inputs_from_text(tokenizer, text, args.noise_ratio, tokenizer.vocab_size, seed=args.seed)
 
-    # Compute logits for main model
-    with torch.no_grad():
-        logits =  model(input_ids).logits
+        # Truncate to model block_size if NanoGPT; HF models can often handle longer but keep it simple
+        max_len = len(noisy_ids)
+        noisy_ids = noisy_ids[:max_len]
+        noise_mask = noise_mask[:max_len]
 
-    # Run rho-1 sorting
-    with torch.no_grad():
-        sorted_token_indices, _ = token_sort_rho(
-            logits, targets, ref_model, input_ids,
-            ratio=args.ratio if args.top_k is None else 1.0,  # ratio irrelevant when using top_k later
-            reverse_select=args.reverse_select,
-            batch_select=False,
-            scale_select=False,
-            mask_select=0,
-            value_select=False,
-            ref_model_2=None,
-            smooth_kernel_size=1,
-            attn_select=False,
-        )
+        # Prepare tensors
+        input_ids = torch.tensor(noisy_ids, dtype=torch.long, device=device).unsqueeze(0)  # (1, T)
+        # build next-token targets; last target is ignore index (-1) expected by NanoGPT token_sort_rho path
+        targets = input_ids.clone()
+        targets[:, :-1] = input_ids[:, 1:]
+        targets[:, -1] = -1
 
-    # Build selection mask
-    T = input_ids.size(1)
-    sel_mask_tensor = select_tokens(sorted_token_indices, T, ratio=args.ratio if args.top_k is None else None, top_k=args.top_k)
-    # don't select the last position (its target is -1), keep mask True there to avoid misleading visualization
-    sel_mask_tensor[:, -1] = True
-    selected_mask = sel_mask_tensor[0].tolist()
+        # Compute logits for main model
+        with torch.no_grad():
+            logits =  model(input_ids).logits
 
-    # Prepare HTML visualization
-    token_pieces = decode_tokens_per_piece(tokenizer, noisy_ids)
-    html = render_html(args.text, token_pieces, selected_mask, [bool(x) for x in noise_mask])
+        # Run rho-1 sorting
+        with torch.no_grad():
+            sorted_token_indices, _ = token_sort_rho(
+                logits, targets, ref_model, input_ids,
+                ratio=args.ratio if args.top_k is None else 1.0,  # ratio irrelevant when using top_k later
+                reverse_select=args.reverse_select,
+                batch_select=False,
+                scale_select=False,
+                mask_select=0,
+                value_select=False,
+                ref_model_2=None,
+                smooth_kernel_size=1,
+                attn_select=False,
+            )
+
+        # Build selection mask
+        T = input_ids.size(1)
+        sel_mask_tensor = select_tokens(sorted_token_indices, T, ratio=args.ratio if args.top_k is None else None, top_k=args.top_k)
+        # don't select the last position (its target is -1), keep mask True there to avoid misleading visualization
+        sel_mask_tensor[:, -1] = True
+        selected_mask = sel_mask_tensor[0].tolist()
+
+        # Prepare HTML visualization
+        token_pieces = decode_tokens_per_piece(tokenizer, noisy_ids)
+        html_head, html_parts, html_tail = render_html(token_pieces, selected_mask, [bool(x) for x in noise_mask])
+        html_parts_lst.append(html_parts)
+    
+    
+    html = "<hr />".join(html_parts_lst)
+    html = html_head + html + html_tail
     with open(args.output, "w", encoding="utf-8") as f:
         f.write(html)
 
-    # Metrics
-    metrics = compute_metrics(selected_mask, [bool(x) for x in noise_mask])
-    total_tokens = len(noisy_ids)
-    filtered_tokens = sum(1 for s in selected_mask if not s)
-
-    print(f"Saved visualization to: {os.path.abspath(args.output)}")
-    print(f"Total tokens: {total_tokens}, Filtered (blue): {filtered_tokens}")
-    print(
-        "Noise filtering metrics -> "
-        f"TP(noise filtered): {metrics['tp']}, FN(noise kept): {metrics['fn']}, "
-        f"FP(clean filtered): {metrics['fp']}, TN(clean kept): {metrics['tn']}\n"
-        f"Precision: {metrics['precision']:.3f}, Recall: {metrics['recall']:.3f}, F1: {metrics['f1']:.3f}"
-    )
 
 
 if __name__ == "__main__":
