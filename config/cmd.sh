@@ -18,6 +18,12 @@ nohup /cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/deepspeed --num_gpus 8
 
 OMP_NUM_THREADS=8 nohup /cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/torchrun --standalone --nproc_per_node 8 train.py config/cont_train_gpt2_owm_rho.py --wandb_log=True --use_deepspeed=True --zero_stage=2 --wandb_run_name='cont-qwen2.5-3B-finewebedu-0.8rho' --out_dir='out-prodcpfs/cont-qwen2.5-3B-finewebedu-0.8rho' --init_from='/prodcpfs/user/fengmingquan/model/Qwen2.5-3B' --ref_model_ckpt='/prodcpfs/user/fengmingquan/model/Qwen2.5-3B-Instruct'   --dataset='/prodcpfs/user/fengmingquan/dataset/processed-qwen2' --batch_size=1 --gradient_accumulation_steps=480 --block_size=4096 --token_keep_ratio=0.8 --max_iters=20000 --lr_decay_iters=20000 --learning_rate=7e-6 --min_lr=7e-7  > log/gpt-owm-rho-2.log 2>&1 &
 
+OMP_NUM_THREADS=8 nohup /cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/torchrun --standalone --nproc_per_node 8 train.py config/cont_train_gpt2_owm_rho.py --wandb_log=False --use_deepspeed=True --zero_stage=2 --wandb_run_name='cont-qwen2.5-3B-finewebedu-0.8rho' --out_dir='out-prodcpfs/tmp' --init_from='/prodcpfs/user/fengmingquan/model/Qwen2.5-3B' --ref_model_ckpt='/prodcpfs/user/fengmingquan/model/Qwen2.5-3B-Instruct'   --dataset='/prodcpfs/user/fengmingquan/dataset/processed-qwen2' --batch_size=1 --gradient_accumulation_steps=480 --block_size=40 --token_keep_ratio=0.8 --max_iters=20000 --lr_decay_iters=20000 --learning_rate=7e-6 --min_lr=7e-7  > log/gpt-owm-rho-3.log 2>&1 &
+
+
 cd /cpfs/user/fengmingquan/nanoGPT
 
 ali-sg-acr-registry-vpc.ap-southeast-1.cr.aliyuncs.com/xhs-llm/xhs-llm:ngc-2403-taishan2
+
+export PATH=$PATH:/cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin
+torchrun --standalone --nproc_per_node=8 train_nanogpt.py config/train_arithmetic_char.py  --gradient_accumulation_steps=8 --batch_size=8

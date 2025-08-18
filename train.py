@@ -145,7 +145,7 @@ def create_deepspeed_config(
     offload_param=False,
     activation_checkpointing=True,
     grad_clip=1.0,
-    output_dir='.'
+    #output_dir='.'
 ):
     """动态生成DeepSpeed配置"""
         
@@ -237,12 +237,12 @@ def create_deepspeed_config(
         }
     
     # 保存配置文件
-    config_path = os.path.join(output_dir, "deepspeed_config.json")
-    with open(config_path, 'w') as f:
-        json.dump(config, f, indent=2)
+    #config_path = os.path.join(output_dir, "deepspeed_config.json")
+    #with open(config_path, 'w') as f:
+    #    json.dump(config, f, indent=2)
     
-    print(f"DeepSpeed config saved to: {config_path}")
-    return config_path
+    #print(f"DeepSpeed config saved to: {config_path}")
+    return config
 
 # various inits, derived attributes, I/O setup
 ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
@@ -415,7 +415,7 @@ model.to(device)
 
 if use_deepspeed:
     import deepspeed
-    deepspeed_config_path = create_deepspeed_config(
+    deepspeed_config = create_deepspeed_config(
         train_batch_size=gradient_accumulation_steps * batch_size * ddp_world_size,  # total batch size across all gpus
         train_micro_batch_size_per_gpu=batch_size,
         gradient_accumulation_steps=gradient_accumulation_steps,  
@@ -432,12 +432,12 @@ if use_deepspeed:
         offload_param=offload_param,
         activation_checkpointing=activation_checkpointing,
         grad_clip=grad_clip,
-        output_dir=out_folder if master_process else '.',
+#        output_dir=out_folder if master_process else '.',
     )
     # DeepSpeed会处理所有分布式逻辑
     model, optimizer, _, lr_scheduler = deepspeed.initialize(
         model=model,
-        config=deepspeed_config_path
+        config=deepspeed_config
     )
 
     
@@ -491,11 +491,11 @@ if len(ref_model_ckpt)>0 and mask_select==0:
 
 if not (ref_model is None) and ref_use_deepspeed:
     # if we use deepspeed, we need to initialize the reference model with deepspeed as well
-    if not os.path.exists('./ref_config'):
-        os.makedirs('./ref_config')
-    if master_process and not os.path.exists(os.path.join(out_folder,'ref_config')):
-        os.makedirs(os.path.join(out_folder,'ref_config'))
-    deepspeed_config_path = create_deepspeed_config(
+#    if not os.path.exists('./ref_config'):
+#        os.makedirs('./ref_config')
+#    if master_process and not os.path.exists(os.path.join(out_folder,'ref_config')):
+#        os.makedirs(os.path.join(out_folder,'ref_config'))
+    deepspeed_config = create_deepspeed_config(
         train_batch_size=gradient_accumulation_steps * batch_size * ddp_world_size,  # total batch size across all gpus
         train_micro_batch_size_per_gpu=batch_size,
         gradient_accumulation_steps=gradient_accumulation_steps,  
@@ -512,12 +512,12 @@ if not (ref_model is None) and ref_use_deepspeed:
         offload_param=offload_param,
         activation_checkpointing=activation_checkpointing,
         grad_clip=grad_clip,
-        output_dir=os.path.join(out_folder,'ref_config') if master_process else './ref_config',
+#        output_dir=os.path.join(out_folder,'ref_config') if master_process else './ref_config',
     )
     # DeepSpeed会处理所有分布式逻辑
     ref_model, _, _, _ = deepspeed.initialize(
         model=ref_model,
-        config=deepspeed_config_path
+        config=deepspeed_config
     )
 
 
