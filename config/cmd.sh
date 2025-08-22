@@ -27,3 +27,6 @@ ali-sg-acr-registry-vpc.ap-southeast-1.cr.aliyuncs.com/xhs-llm/xhs-llm:ngc-2403-
 
 export PATH=$PATH:/cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin
 torchrun --standalone --nproc_per_node=8 train_nanogpt.py config/train_arithmetic_char.py  --gradient_accumulation_steps=8 --batch_size=8
+
+
+juicefs sync -u -p 100 --exclude "00*.parquet" oss://LTAI5tDuCoTTh6gu5PK8gFfN:6eZGIEeLo81eRSqYRMHUEG2FcVTkQV@lsg-oss-chatgpt-agi-hcfs.oss-ap-southeast-1-internal.aliyuncs.com/crawl/multimodal/HuggingFaceFW/fineweb-edu/sample/100BT/ /prodcpfs/user/fengmingquan/dataset/raw/fineweb-edu/sample/100BT-25BT/

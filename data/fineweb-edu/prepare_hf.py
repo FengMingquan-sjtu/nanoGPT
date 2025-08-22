@@ -20,8 +20,10 @@ num_proc_load_dataset = 40
 tokenizer = AutoTokenizer.from_pretrained("/prodcpfs/user/fengmingquan/model/Qwen2-0.5B")  # 请根据需要修改模型名称
 
 # download data by:
-input_path = "/prodcpfs/user/fengmingquan/dataset/raw/fineweb-edu/sample/10BT"
-output_path = "/prodcpfs/user/fengmingquan/dataset/processed-qwen2/fineweb-edu-10bt"
+#input_path = "/prodcpfs/user/fengmingquan/dataset/raw/fineweb-edu/sample/10BT"
+#output_path = "/prodcpfs/user/fengmingquan/dataset/processed-qwen2/fineweb-edu-10bt"
+input_path = "/prodcpfs/user/fengmingquan/dataset/raw/fineweb-edu/sample/100BT-25BT"
+output_path = "/prodcpfs/user/fengmingquan/dataset/processed-qwen2/fineweb-edu-100bt-25bt"
 if not os.path.exists(output_path):
     os.makedirs(output_path)
 
@@ -105,7 +107,7 @@ if __name__ == '__main__':
     print(f"\n# To read the bin files later, use the same dtype ({dtype}):")
     print(f"# m = np.memmap('train.bin', dtype=np.{dtype.__name__}, mode='r')")
 
-# nohup /cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/python data/fineweb-edu/prepare_hf.py > log/prepare_hf_2.log 2>&1 &
+# nohup /cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/python data/fineweb-edu/prepare_hf.py > log/prepare_hf_3.log 2>&1 &
 
 
 # fineweb-edu-10bt+qwen2 --> 9.89B tokens

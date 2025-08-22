@@ -123,6 +123,8 @@ def main():
         limit=args.limit,
         verbosity="WARNING",
         confirm_run_unsafe_code=True,
+        write_out=True,
+        log_samples=True,
     )
     # only rank 0 will print results
     rank = int(os.environ.get('RANK', 0))
@@ -132,6 +134,7 @@ def main():
         print("EVALUATION RESULTS")
         print("="*50)
         print(results['results'])
+        print(results)
         print("="*50)
         
         # Save results if requested
@@ -152,6 +155,8 @@ def main():
             for dataset_name, dataset_res in results['results'].items():
                 if not dataset_name in args.dataset_name.split(','):
                     continue
+                if dataset_name.endswith("_ppl"):
+                    dataset_name = dataset_name.replace("_ppl", "")
                 for key, value in dataset_res.items():
                     if key == "alias":
                         continue
