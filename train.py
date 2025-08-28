@@ -91,6 +91,7 @@ weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95
 grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
+eps = 1e-8
 # learning rate decay settings
 decay_lr = True # whether to decay the learning rate
 warmup_iters = 2000 # how many steps to warm up for
@@ -164,7 +165,7 @@ def create_deepspeed_config(
                     beta1,
                     beta2
                 ],
-                "eps": 1e-8
+                "eps": eps
             }
         },
         
@@ -414,14 +415,16 @@ else:
                     wandb_id = line.split("/runs/")[-1].strip()
                     break
         ckpts = [f for f in os.listdir(out_folder) if f.startswith('ckpt') and f.endswith('.pt')]
-        ckpt_path = os.path.join(out_folder, sorted(ckpts)[-1])
-        checkpoint = torch.load(ckpt_path, map_location=device)
+        ckpt = sorted(ckpts, key=lambda x: int(x.lstrip('ckpt-').rstrip('.pt')))[-1]
+        print(f"Resuming from checkpoint {ckpt}")
+        ckpt_path = os.path.join(out_folder, ckpt)
+        checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
         model_config = AutoConfig.from_pretrained(init_from)
         model = AutoModelForCausalLM.from_pretrained(init_from, config=model_config)
         state_dict = checkpoint['model']
         state_dict = remove_prefix_from_state_dict(state_dict)
         model.load_state_dict(state_dict)
-        iter_num = checkpoint['iter_num']
+        iter_num = checkpoint['iter_num'] + 1
 model.to(device)
 
 

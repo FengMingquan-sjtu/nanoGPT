@@ -89,7 +89,7 @@ def main():
         eval_model = VLLM(
             pretrained=hf_model_path,  # Path to the model or model name
             tensor_parallel_size=1,  #
-            gpu_memory_utilization=0.8, # 0.9 will cause OOM
+            gpu_memory_utilization=0.15, # 0.9 will cause OOM
             trust_remote_code=True,
             dtype="auto",
             max_model_len=args.block_size,
@@ -107,7 +107,7 @@ def main():
         raise ValueError(f"Unsupported backend: {args.backend}. Choose from 'hflm' or 'vllm'.")
     
 
-    if "gpqa" in args.dataset_name:
+    if "gpqa" in args.dataset_name or "synthetic_human" in args.dataset_name:
         # GBQA needs hf login, but network error sometimes.
         key_file = "/cpfs/user/fengmingquan/nanoGPT/hf_key.txt"
         with open(key_file, 'r') as f:
@@ -123,8 +123,8 @@ def main():
         limit=args.limit,
         verbosity="WARNING",
         confirm_run_unsafe_code=True,
-        write_out=True,
-        log_samples=True,
+        write_out=False,
+        log_samples=False,
     )
     # only rank 0 will print results
     rank = int(os.environ.get('RANK', 0))

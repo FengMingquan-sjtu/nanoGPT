@@ -9,44 +9,28 @@
 # pkill -f VLLM
 # fuser -v /dev/nvidia*
 
-model_path="out-prodcpfs/qwen2-0.5B-finewebedu+cosmopedia"  #+cosmopedia
+model_path="out-prodcpfs/qwen2-0.5B-bio-qa"  # Path to the model directory
 model_name="auto"  # Specify the model name
 batch_size=0  # Adjust batch size as needed, 0 for automatic selection
-block_size=4096  # Adjust block size as needed
-n_shot_prompt=5  # Number of n-shot examples to include in the prompt
+block_size=512  # Adjust block size as needed
+n_shot_prompt=3  # Number of n-shot examples to include in the prompt
 backend="vllm"  # Backend to use for evaluation, options: "hflm", "vllm", "sglang"
 device="cuda"
-#python_path="/cpfs/user/fengmingquan/venv/lm_eval/bin/python"
 python_path="/cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/python"  # Path to the Python interpreter
-#python_path="/cpfs/user/fengmingquan/venv/lm_eval_2/bin/python"
+
 
 #--------------
-limit=1000000  # Maximum number of samples to evaluate (for quick testing)
+limit=2000  # Maximum number of samples to evaluate (for quick testing)
 wandb_id="auto"  # Set to "auto" to automatically find the wandb ID from the log file
-gpu_id_base=6
+gpu_id_base=1
 node_id=1
 checkpoints=(
-    44000 46000
-#    0 1000 2000
-#    4000 6000 8000
-#    10000 12000 14000
-#    20000 18000 16000
+    40000
 )
 datasets=(
-#    "mmlu_pro"
-#    "mmlu,arc_challenge,arc_easy,hellaswag,winogrande,mbpp,humaneval,gsm8k,gpqa_main_n_shot"
-#     "gsm8k"
-#    "gsm8k_ppl"
-    "mmlu,arc_challenge,arc_easy,hellaswag,winogrande,piqa,openbookqa"
-#   "gpqa_main_n_shot_ppl"
-#    "lambada_openai,lambada_standard"
+    "synthetic_human_age,synthetic_human_location,synthetic_human_occupation,synthetic_human_wage,synthetic_human_gender"
 )
-# mmlu,mmlu_pro,arc_challenge,arc_easy,gpqa_main_n_shot
-# hellaswag,winogrande,mbpp
-# ----
-# drop
-# humaneval,mbpp
-# hendrycks_math,gsm8k
+
 for i in "${!checkpoints[@]}"; do
     $python_path convert_pt_to_hf.py --model_path $model_path --ckpt_step ${checkpoints[$i]} --model_name $model_name
     for j in "${!datasets[@]}"; do
