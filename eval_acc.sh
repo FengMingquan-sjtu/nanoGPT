@@ -9,7 +9,7 @@
 # pkill -f VLLM
 # fuser -v /dev/nvidia*
 
-model_path="out-prodcpfs/qwen2-0.5B-finewebedu+cosmopedia"  #+cosmopedia
+model_path="out-prodcpfs/qwen2-0.5B-finewebedu+nemotron"  #+cosmopedia  +nemotron
 model_name="auto"  # Specify the model name
 batch_size=0  # Adjust batch size as needed, 0 for automatic selection
 block_size=4096  # Adjust block size as needed
@@ -23,10 +23,10 @@ python_path="/cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/python"  # Path
 #--------------
 limit=1000000  # Maximum number of samples to evaluate (for quick testing)
 wandb_id="auto"  # Set to "auto" to automatically find the wandb ID from the log file
-gpu_id_base=6
-node_id=1
+gpu_id_base=3
+node_id=0
 checkpoints=(
-    44000 46000
+    40000
 #    0 1000 2000
 #    4000 6000 8000
 #    10000 12000 14000
@@ -37,7 +37,8 @@ datasets=(
 #    "mmlu,arc_challenge,arc_easy,hellaswag,winogrande,mbpp,humaneval,gsm8k,gpqa_main_n_shot"
 #     "gsm8k"
 #    "gsm8k_ppl"
-    "mmlu,arc_challenge,arc_easy,hellaswag,winogrande,piqa,openbookqa"
+    "mmlu,arc_challenge,arc_easy"
+    "hellaswag,winogrande,piqa,openbookqa"
 #   "gpqa_main_n_shot_ppl"
 #    "lambada_openai,lambada_standard"
 )

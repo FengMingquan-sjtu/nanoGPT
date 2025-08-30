@@ -21,8 +21,8 @@ tokenizer = AutoTokenizer.from_pretrained("/prodcpfs/user/fengmingquan/model/Qwe
 
 # download data by:
 
-input_path = "/prodcpfs/user/fengmingquan/dataset/raw/Nemotron-Pretraining-Dataset-sample"
-output_path = "/prodcpfs/user/fengmingquan/dataset/processed-qwen2/nemotron-sample"
+input_path = "/prodcpfs/user/fengmingquan/dataset/raw/nemotron-cc-hq-small"
+output_path = "/prodcpfs/user/fengmingquan/dataset/processed-qwen2/copy-nemotron-cc-hq-smal"
 if not os.path.exists(output_path):
     os.makedirs(output_path)
 
@@ -31,15 +31,10 @@ if __name__ == '__main__':
     print(f"Using tokenizer: {tokenizer.name_or_path}")
     print(f"Vocab size: {tokenizer.vocab_size}")
     print(f"EOS token ID: {tokenizer.eos_token_id}")
-    config_name = ['Nemotron-CC-MATH', 'Nemotron-CC-High-Quality', 'Nemotron-CC-High-Quality-Synthetic', 'Nemotron-CC-Diverse-QA', 'Nemotron-CC-Translated-Diverse-QA', 'Nemotron-Synthetic-Code', 'Nemotron-SFT-Code', 'Nemotron-SFT-General', 'Nemotron-SFT-MATH', 'Nemotron-Code-Metadata']
-    
-    datasets = [load_dataset(input_path, name, num_proc=num_proc_load_dataset, split='train') for name in config_name]
 
-    #drop other columns except 'text'
-    datasets = [ds.remove_columns([col for col in ds.column_names if col != 'text']) for ds in datasets]
-    # concatenate all splits into one dataset
-    dataset = concatenate_datasets(datasets)
-    dataset = DatasetDict({'train': dataset})
+
+    dataset = load_dataset("json", data_dir=input_path, num_proc=num_proc_load_dataset)
+    print(dataset)
     
     # owt by default only contains the 'train' split, so create a test split
     if not ("val" in dataset):
@@ -89,7 +84,7 @@ if __name__ == '__main__':
             print(f"Using uint64 for vocab size {max_token_id}")
         
         arr = np.memmap(filename, dtype=dtype, mode='w+', shape=(arr_len,))
-        total_batches = 256
+        total_batches = 1024
         
         idx = 0
         for batch_idx in tqdm(range(total_batches), desc=f'writing {filename}'):
@@ -108,7 +103,7 @@ if __name__ == '__main__':
     print(f"\n# To read the bin files later, use the same dtype ({dtype}):")
     print(f"# m = np.memmap('train.bin', dtype=np.{dtype.__name__}, mode='r')")
 
-# nohup /cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/python data/nemotron/prepare_hf.py > log/prepare_hf_12.log 2>&1 &
+# nohup /cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/python data/nemotron/prepare_hf.py > log/prepare_hf_1.log 2>&1 &
 
 
-# fineweb-edu-10bt+qwen2 --> 9.89B tokens
+# processed-qwen2/copy-nemotron-cc-hq-smal/train.bin with 52302808 samples and 21071209546 tokens.(21B)

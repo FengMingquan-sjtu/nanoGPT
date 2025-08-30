@@ -5,7 +5,7 @@ from tqdm import tqdm
 import numpy as np
 from transformers import AutoTokenizer
 from datasets import load_dataset  # huggingface datasets
-
+import multiprocessing as mp
 # number of workers in .map() call
 # good number to use is ~order number of cpu cores // 2
 num_proc = 40
@@ -20,16 +20,33 @@ num_proc_load_dataset = 40
 tokenizer = AutoTokenizer.from_pretrained("/prodcpfs/user/fengmingquan/model/Qwen2-0.5B")  # 请根据需要修改模型名称
 
 # download data by:
-#input_path = "/prodcpfs/user/fengmingquan/dataset/raw/fineweb-edu/sample/10BT"
-#output_path = "/prodcpfs/user/fengmingquan/dataset/processed-qwen2/fineweb-edu-10bt"
-#input_path = "/prodcpfs/user/fengmingquan/dataset/raw/fineweb-edu/sample/100BT-25BT"
-#output_path = "/prodcpfs/user/fengmingquan/dataset/processed-qwen2/fineweb-edu-100bt-25bt"
-input_path = "/oss/crawl/multimodal/HuggingFaceFW/fineweb-edu/sample/100BT/"
-output_path = "/prodcpfs/user/fengmingquan/dataset/processed-qwen2/fineweb-edu-100bt-25bt-1"
-total_batches = 1024  # 1024 for 10BT, 2048 for 25BT, 4096 for 100BT
+input_path = "/prodcpfs/user/fengmingquan/dataset/raw/fineweb-edu/sample/10BT"
+output_path = "/prodcpfs/user/fengmingquan/dataset/processed-qwen2/tmp2-fineweb-edu-10bt"
 
 if not os.path.exists(output_path):
     os.makedirs(output_path)
+
+def writer_process(queue, filename, dtype, shape):
+    """这个函数在独立的进程中运行，专门负责从队列中获取数据并写入文件"""
+    # 在子进程中重新打开 memmap 文件
+    arr_writer = np.memmap(filename, dtype=dtype, mode='r+', shape=shape)
+    
+    idx = 0
+    while True:
+        # 从队列中获取数据，如果队列为空，会阻塞等待
+        batch_data = queue.get()
+        
+        # 接收到结束信号 (None) 时，退出循环
+        if batch_data is None:
+            break
+            
+        # 写入数据
+        arr_writer[idx : idx + len(batch_data)] = batch_data
+        idx += len(batch_data)
+        
+    # 确保所有内容都写入磁盘
+    arr_writer.flush()
+    print("Writer process finished.")
 
 if __name__ == '__main__':
     # 打印tokenizer信息
@@ -37,15 +54,8 @@ if __name__ == '__main__':
     print(f"Vocab size: {tokenizer.vocab_size}")
     print(f"EOS token ID: {tokenizer.eos_token_id}")
 
-    #dataset = load_dataset(input_path, num_proc=num_proc_load_dataset)
-    data_files = []
-    for idx in range(0, 20):
-        i = idx // 10
-        j = idx % 10
-        data_files.append(os.path.join(input_path, f'00{i}_0000{j}.parquet'))
-    print(f"Loading {len(data_files)} files...")
-    print(data_files)
-    dataset = load_dataset("parquet", data_files=data_files, num_proc=num_proc_load_dataset)
+    dataset = load_dataset(input_path, num_proc=num_proc_load_dataset)
+    use_queue = False
 
     # filter the dataset 
     #def filter_function(example):
@@ -55,8 +65,9 @@ if __name__ == '__main__':
     # owt by default only contains the 'train' split, so create a test split
     if not ("val" in dataset):
         # If 'val' split does not exist, create it
-        split_dataset = dataset["train"].train_test_split(test_size=0.0005, seed=2357, shuffle=True)
-        split_dataset['val'] = split_dataset.pop('test')
+        split_dataset = dataset["train"].train_test_split(test_size=0.95, seed=2357, shuffle=True) #NOTE: only keep a small portion for tmp test
+        split_dataset.pop('test')
+        
     else:
         split_dataset = dataset
     
@@ -100,17 +111,44 @@ if __name__ == '__main__':
             print(f"Using uint64 for vocab size {max_token_id}")
         
         arr = np.memmap(filename, dtype=dtype, mode='w+', shape=(arr_len,))
+        total_batches = 1024
         
-        idx = 0
-        for batch_idx in tqdm(range(total_batches), desc=f'writing {filename}'):
-            # Batch together samples for faster write
-            batch = dset.shard(num_shards=total_batches, index=batch_idx, contiguous=True).with_format('numpy')
-            arr_batch = np.concatenate(batch['ids'])
-            # Write into mmap
-            arr[idx: idx + len(arr_batch)] = arr_batch
-            idx += len(arr_batch)
-        
-        arr.flush()
+        if use_queue:
+            queue = mp.Queue(maxsize=8) 
+
+            # 3. 启动写入者进程
+            writer = mp.Process(target=writer_process, args=(queue, filename, dtype, (arr_len,)))
+            writer.start()
+
+            # 4. 主进程作为生产者，准备数据并放入队列
+            print(f"Main process started writing to {filename}")
+            for batch_idx in tqdm(range(total_batches)):
+                # 准备数据（这部分和你的代码一样）
+                batch = dset.shard(num_shards=total_batches, index=batch_idx, contiguous=True).with_format('numpy')
+                arr_batch = np.concatenate(batch['ids'])
+                
+                # 将准备好的数据放入队列，如果队列满了，会阻塞等待
+                queue.put(arr_batch)
+
+            # 5. 所有数据都放入队列后，放入一个 "结束信号"
+            queue.put(None)
+
+            # 6. 等待写入者进程执行完毕
+            writer.join()
+        else:
+            print(f"Single process started writing to {filename}")
+            idx = 0
+            for batch_idx in tqdm(range(total_batches), desc=f'writing {filename}'):
+                # Batch together samples for faster write
+                batch = dset.shard(num_shards=total_batches, index=batch_idx, contiguous=True).with_format('numpy')
+                arr_batch = np.concatenate(batch['ids'])
+                # Write into mmap
+                arr[idx: idx + len(arr_batch)] = arr_batch
+                idx += len(arr_batch)
+            
+            arr.flush()
+
+
         print(f"Saved {split} dataset to {filename} with {len(dset)} samples and {arr_len} tokens.")
         print(f"File size: {os.path.getsize(filename) / (1024**3):.2f} GB")
     
@@ -118,8 +156,7 @@ if __name__ == '__main__':
     print(f"\n# To read the bin files later, use the same dtype ({dtype}):")
     print(f"# m = np.memmap('train.bin', dtype=np.{dtype.__name__}, mode='r')")
 
-# nohup /cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/python data/fineweb-edu/prepare_hf.py > log/prepare_hf_3.log 2>&1 &
+# nohup /cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/python data/fineweb-edu/prepare_hf_tmp.py > log/prepare_hf_04.log 2>&1 &
 
 
 # fineweb-edu-10bt+qwen2 --> 9.89B tokens
-# processed-qwen2/fineweb-edu-100bt-25bt/train.bin with 24220569 samples and 24721353842 tokens. (24.72 B tokens)
