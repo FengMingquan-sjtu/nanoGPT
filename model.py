@@ -596,3 +596,30 @@ def get_loss_cls_rho(logits, targets, ref_model, idx, ratio, cluster_analyzer, f
         # standard cross-entropy loss
         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=ignore_idx)
     return loss
+
+
+
+def get_loss_distill(logits, targets, ref_model, idx, temperature=2.0, distill_ratio=0.9):
+    """ Model Distillation
+    Calculate the loss given the logits and targets.
+    If ref_model is provided, use it to calculate the reference logits for KL divergence.
+    """
+    if ref_model is not None: #selection tokens by rho-1 algorithm.
+        b, t, vocab_size = logits.size()
+        #logits shape (b, t, vocab_size), targets shape (b, t), token_loss shape (b*t)
+        hard_loss = F.cross_entropy(logits.view(-1, vocab_size), targets.view(-1), reduction='mean')
+
+        with torch.no_grad():
+            ref_model.eval()
+            ref_logits = ref_model(idx).logits
+            soft_targets = F.softmax(ref_logits.view(-1, vocab_size) / temperature, dim=-1)
+
+        soft_prob = F.log_softmax(logits.view(-1, vocab_size) / temperature, dim=-1)
+        kl_div = F.kl_div(soft_prob, soft_targets, reduction='batchmean')
+        loss = hard_loss * (1 - distill_ratio) + kl_div * distill_ratio * (temperature ** 2)
+
+    else:
+        # standard cross-entropy loss
+        # reshape logits and targets to be of shape (b*t, vocab_size) and (b*t,)
+        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=ignore_idx)
+    return loss

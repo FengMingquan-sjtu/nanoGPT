@@ -31,7 +31,7 @@ from transformers import AutoModelForCausalLM, AutoConfig
 import torch.nn.functional as F
 
 from model import GPTConfig, GPT
-from model import get_loss_rho, get_loss_cls_rho, remove_prefix_from_state_dict
+from model import get_loss_rho, get_loss_cls_rho, remove_prefix_from_state_dict, get_loss_distill
 from model import configure_AdamW_optimizer
 from dataloader import DistributedDataLoader
 
@@ -66,6 +66,13 @@ mask_select = 0 # if > 0, use attention mask to select tokens, otherwise use no 
 value_select = False # if True, use the value of the loss instead of the difference from the reference model.
 smooth_kernel_size = 1 # kernel size for smoothing the token loss, 1 means no smoothing
 attn_select = False # 
+# distill
+distill_ratio = 0.9 # weight for distillation loss
+temperature = 2.0 # temperature for distillation
+
+# loss type
+loss_type = 'distill' # 'rho' or 'distill'
+
 # wandb logging
 wandb_log = False # disabled by default
 wandb_project = 'owt'
@@ -107,6 +114,7 @@ compile = False # use PyTorch 2.0 to compile the model to be faster
 use_deepspeed = True
 ref_use_deepspeed = True # use deepspeed for the reference model
 zero_stage = 2
+ref_zero_stage = 3
 offload_optimizer = False  
 offload_param = False
 activation_checkpointing = False
@@ -147,7 +155,7 @@ def create_deepspeed_config(
     offload_param=False,
     activation_checkpointing=True,
     grad_clip=1.0,
-    #output_dir='.'
+    no_optimizer=False,
 ):
     """动态生成DeepSpeed配置"""
         
@@ -238,6 +246,11 @@ def create_deepspeed_config(
             "profile": False
         }
     
+    if no_optimizer:
+        del config["optimizer"]
+        del config["scheduler"]
+
+
     # 保存配置文件
     #config_path = os.path.join(output_dir, "deepspeed_config.json")
     #with open(config_path, 'w') as f:
@@ -505,35 +518,23 @@ if len(ref_model_ckpt)>0 and mask_select==0:
     print(f"Loaded reference model from {ref_model_ckpt}")
 
 if not (ref_model is None) and ref_use_deepspeed:
-    # if we use deepspeed, we need to initialize the reference model with deepspeed as well
-#    if not os.path.exists('./ref_config'):
-#        os.makedirs('./ref_config')
-#    if master_process and not os.path.exists(os.path.join(out_folder,'ref_config')):
-#        os.makedirs(os.path.join(out_folder,'ref_config'))
     deepspeed_config = create_deepspeed_config(
         train_batch_size=gradient_accumulation_steps * batch_size * ddp_world_size,  # total batch size across all gpus
         train_micro_batch_size_per_gpu=batch_size,
         gradient_accumulation_steps=gradient_accumulation_steps,  
-        learning_rate=learning_rate,
-        weight_decay=weight_decay, 
-        beta1=beta1,
-        beta2=beta2,
-        warmup_iters=warmup_iters,
-        max_iters=max_iters,
-        min_lr=min_lr,
         dtype=dtype,
-        zero_stage=3,
+        zero_stage=ref_zero_stage,
         offload_optimizer=offload_optimizer,
         offload_param=offload_param,
         activation_checkpointing=activation_checkpointing,
-        grad_clip=grad_clip,
-#        output_dir=os.path.join(out_folder,'ref_config') if master_process else './ref_config',
+        no_optimizer=True, # NOTE: we don't need optimizer for the reference model
     )
     # DeepSpeed会处理所有分布式逻辑
     ref_model, _, _, _ = deepspeed.initialize(
         model=ref_model,
         config=deepspeed_config
     )
+    ref_model.eval()
 
 
 ref_model_2 = None
@@ -648,7 +649,10 @@ running_mfu = -1.0
 while True:
 
     # determine and set the learning rate for this iteration
-    lr = get_lr(iter_num) if decay_lr else learning_rate
+    if use_deepspeed:
+        lr = model.get_lr()[0] # note: only need to look at the first param group
+    else:
+        lr = get_lr(iter_num) if decay_lr else learning_rate
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
         if use_muon and param_group["use_muon"]:
@@ -688,17 +692,24 @@ while True:
                     logits, _ = model(X, Y)
                 else:
                     logits = model(X).logits
-                loss = get_loss_rho(logits, Y, ref_model, X, token_keep_ratio, 
+                
+                if loss_type == 'distill':
+                    loss = get_loss_distill(logits, Y, ref_model, X, temperature, distill_ratio)
+
+                elif loss_type == 'rho':
+                    loss = get_loss_rho(logits, Y, ref_model, X, token_keep_ratio, 
                                 reverse_select, batch_select, scale_select, 
                                 mask_select, value_select, ref_model_2, 
                                 smooth_kernel_size, attn_select)
-                loss = loss / gradient_accumulation_steps
+                else:
+                    raise ValueError(f"Unknown loss_type: {loss_type}")
                 
             model.backward(loss)
             X, Y = get_batch('train')
         
-        model.step()
+            model.step() # NOTE: needs to be called inside the micro_step loop in deepspeed
     else:
+        raise NotImplementedError("Only deepspeed is supported now.")
         # forward backward update, with optional gradient accumulation to simulate larger batch size
         # and using the GradScaler if data type is float16
         for micro_step in range(gradient_accumulation_steps):
@@ -734,7 +745,7 @@ while True:
     if iter_num % log_interval == 0 and master_process:
         # get loss as float. note: this is a CPU-GPU sync point
         # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
-        lossf = loss.item() * gradient_accumulation_steps
+        lossf = loss.item() if use_deepspeed else loss.item() * gradient_accumulation_steps
         if local_iter_num >= 5: # let the training loop settle a bit
             #mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
             #running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu

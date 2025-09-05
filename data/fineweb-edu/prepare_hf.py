@@ -25,7 +25,7 @@ tokenizer = AutoTokenizer.from_pretrained("/prodcpfs/user/fengmingquan/model/Qwe
 #input_path = "/prodcpfs/user/fengmingquan/dataset/raw/fineweb-edu/sample/100BT-25BT"
 #output_path = "/prodcpfs/user/fengmingquan/dataset/processed-qwen2/fineweb-edu-100bt-25bt"
 input_path = "/oss/crawl/multimodal/HuggingFaceFW/fineweb-edu/sample/100BT/"
-output_path = "/prodcpfs/user/fengmingquan/dataset/processed-qwen2/fineweb-edu-100bt-25bt-1"
+output_path = "/prodcpfs/user/fengmingquan/dataset/processed-qwen2/fineweb-edu-100bt-20bt"
 total_batches = 1024  # 1024 for 10BT, 2048 for 25BT, 4096 for 100BT
 
 if not os.path.exists(output_path):
@@ -39,7 +39,7 @@ if __name__ == '__main__':
 
     #dataset = load_dataset(input_path, num_proc=num_proc_load_dataset)
     data_files = []
-    for idx in range(0, 20):
+    for idx in range(75, 100):
         i = idx // 10
         j = idx % 10
         data_files.append(os.path.join(input_path, f'00{i}_0000{j}.parquet'))
@@ -118,8 +118,17 @@ if __name__ == '__main__':
     print(f"\n# To read the bin files later, use the same dtype ({dtype}):")
     print(f"# m = np.memmap('train.bin', dtype=np.{dtype.__name__}, mode='r')")
 
-# nohup /cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/python data/fineweb-edu/prepare_hf.py > log/prepare_hf_3.log 2>&1 &
+# nohup /cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/python data/fineweb-edu/prepare_hf.py > log/prepare_hf_04.log 2>&1 &
+# prepare_hf_01.log -- 17bt --- 00~25.parquet
+# prepare_hf_02.log -- 18bt --- 25~50.parquet
+# prepare_hf_03.log -- 19bt --- 50~75.parquet
+# prepare_hf_04.log -- 20bt --- 75~100.parquet
 
 
 # fineweb-edu-10bt+qwen2 --> 9.89B tokens
 # processed-qwen2/fineweb-edu-100bt-25bt/train.bin with 24220569 samples and 24721353842 tokens. (24.72 B tokens)
+
+# processed-qwen2/fineweb-edu-100bt-17bt/train.bin with 18198896 samples and 18716911567 tokens. (18.72 B tokens)
+# processed-qwen2/fineweb-edu-100bt-18bt/train.bin with 18415787 samples and 18664843604 tokens.
+# processed-qwen2/fineweb-edu-100bt-19bt/train.bin with 18339825 samples and 18748648871 tokens.
+# processed-qwen2/fineweb-edu-100bt-20bt/train.bin with 18046972 samples and 18753313740 tokens.

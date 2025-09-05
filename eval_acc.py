@@ -71,6 +71,8 @@ def main():
                        help='Number of processes to use for loading dataset (default: 8)')
     parser.add_argument('--backend', type=str, default="hflm",
                        help='Backend to use for evaluation (default: hflm), use vllm for faster evaluation')
+    parser.add_argument('--gpu_ratio', type=float, default=0.8,
+                       help='GPU memory utilization ratio for vllm (default: 0.8), 0.9 will cause OOM')
 
     args = parser.parse_args()
     args = auto_parse_path(args)
@@ -89,7 +91,7 @@ def main():
         eval_model = VLLM(
             pretrained=hf_model_path,  # Path to the model or model name
             tensor_parallel_size=1,  #
-            gpu_memory_utilization=0.15, # 0.9 will cause OOM
+            gpu_memory_utilization= args.gpu_ratio, 
             trust_remote_code=True,
             dtype="auto",
             max_model_len=args.block_size,
