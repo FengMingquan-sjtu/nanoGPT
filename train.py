@@ -31,7 +31,7 @@ from transformers import AutoModelForCausalLM, AutoConfig
 import torch.nn.functional as F
 
 from model import GPTConfig, GPT
-from model import get_loss_rho, get_loss_cls_rho, remove_prefix_from_state_dict, get_loss_distill
+from model import get_loss_rho, remove_prefix_from_state_dict, get_loss_distill
 from model import configure_AdamW_optimizer
 from dataloader import DistributedDataLoader
 
@@ -56,8 +56,8 @@ always_save_checkpoint = True # if True, always save a checkpoint after each eva
 init_from = ''  # model name or path
 train_mode = 'cont_pretrain' # 'scratch' or 'resume' or 'cont_pretrain'
 # token selection
-ref_model_ckpt = "" # reference model file, used for data selection
-ref_model_ckpt_2 = "" # second reference model file, used for data selection
+ref_model_ckpt = "" # reference model file, used for data selection or distillation
+ref_model_ckpt_2 = "" # second reference model file, used for data selection or distillation
 clustering_ckpt = "" # token clustering results, used for cluster data selection
 reverse_select = False # if True, select tokens in reverse order.
 scale_select = False # if True, select tokens by relative scale of loss instead of difference.
@@ -69,6 +69,8 @@ attn_select = False #
 # distill
 distill_ratio = 0.9 # weight for distillation loss
 temperature = 2.0 # temperature for distillation
+distill_top_k = 0 # if > 0, use top-k distillation
+distill_online = False # if True, use online distillation, from ref_model_ckpt_2
 
 # loss type
 loss_type = 'distill' # 'rho' or 'distill'
@@ -496,46 +498,47 @@ ref_model = None
 #    ref_model.to(device)
 #    ref_model.eval()
 
-if len(ref_model_ckpt)>0 and mask_select==0:
-    if "gpt2" in ref_model_ckpt:
-        if ref_model_ckpt.endswith('.pt'):
-            # resume training from a checkpoint.
-            ref_checkpoint = torch.load(ref_model_ckpt, map_location=device)
-            ref_model_args = ref_checkpoint['model_args']
-            # create the model
-            ref_gptconf = GPTConfig(**ref_model_args)
-            ref_model = GPT(ref_gptconf)
-            ref_state_dict = ref_checkpoint['model']
-            ref_model.load_ckp_state_dict(ref_state_dict)
-        else:
-            # load from a pretrained model
-            override_args = dict(dropout=dropout)
-            ref_model = GPT.from_pretrained(ref_model_ckpt, override_args)
-    else:
-        ref_model = AutoModelForCausalLM.from_pretrained(ref_model_ckpt)
-    ref_model.to(device)
-    ref_model.eval()
-    print(f"Loaded reference model from {ref_model_ckpt}")
+def load_deepspeed_ref_model(ref_model_ckpt_, ref_model_ckpt_2=""):
+    ref_model = None
+    if len(ref_model_ckpt_)>0 and mask_select==0:
+        ref_model = AutoModelForCausalLM.from_pretrained(ref_model_ckpt_)
+        print(f"Loaded reference model from {ref_model_ckpt_}")
+        if len(ref_model_ckpt_2)>0:
+            print(f"Overriding reference model with {ref_model_ckpt_2}")
+            if ref_model_ckpt_2.endswith('.pt'):
+                # resume training from a checkpoint.
+                ref_checkpoint = torch.load(ref_model_ckpt_2, map_location='cpu', weights_only=False)
+                ref_state_dict = ref_checkpoint['model']
+                ref_state_dict = remove_prefix_from_state_dict(ref_state_dict)
+                ref_model.load_state_dict(ref_state_dict)
+            else:
+                ref_model_2 = AutoModelForCausalLM.from_pretrained(ref_model_ckpt_2)
+                ref_model.load_state_dict(ref_model_2.state_dict())
+        ref_model.to(device)
+        ref_model.eval()
+        
 
-if not (ref_model is None) and ref_use_deepspeed:
-    deepspeed_config = create_deepspeed_config(
-        train_batch_size=gradient_accumulation_steps * batch_size * ddp_world_size,  # total batch size across all gpus
-        train_micro_batch_size_per_gpu=batch_size,
-        gradient_accumulation_steps=gradient_accumulation_steps,  
-        dtype=dtype,
-        zero_stage=ref_zero_stage,
-        offload_optimizer=offload_optimizer,
-        offload_param=offload_param,
-        activation_checkpointing=activation_checkpointing,
-        no_optimizer=True, # NOTE: we don't need optimizer for the reference model
-    )
-    # DeepSpeed会处理所有分布式逻辑
-    ref_model, _, _, _ = deepspeed.initialize(
-        model=ref_model,
-        config=deepspeed_config
-    )
-    ref_model.eval()
+    if not (ref_model is None) and ref_use_deepspeed:
+        deepspeed_config = create_deepspeed_config(
+            train_batch_size=gradient_accumulation_steps * batch_size * ddp_world_size,  # total batch size across all gpus
+            train_micro_batch_size_per_gpu=batch_size,
+            gradient_accumulation_steps=gradient_accumulation_steps,  
+            dtype=dtype,
+            zero_stage=ref_zero_stage,
+            offload_optimizer=offload_optimizer,
+            offload_param=offload_param,
+            activation_checkpointing=activation_checkpointing,
+            no_optimizer=True, # NOTE: we don't need optimizer for the reference model
+        )
+        # DeepSpeed会处理所有分布式逻辑
+        ref_model, _, _, _ = deepspeed.initialize(
+            model=ref_model,
+            config=deepspeed_config
+        )
+        ref_model.eval()
+    return ref_model
 
+ref_model = load_deepspeed_ref_model(ref_model_ckpt)
 
 ref_model_2 = None
 
@@ -646,6 +649,7 @@ t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if hasattr(model, 'module') else model # the raw model without DDP wrapper
 running_mfu = -1.0
+ref_model_ckpt_2_name = ""
 while True:
 
     # determine and set the learning rate for this iteration
@@ -681,6 +685,25 @@ while True:
             }
             print(f"saving checkpoint to {out_folder}")
             torch.save(checkpoint, os.path.join(out_folder, f'ckpt-{iter_num}.pt'))
+
+
+    if (iter_num % eval_interval == 0 or iter_num==eval_interval//2): # for all processes   
+        if loss_type == 'distill' and distill_online:
+            # get the check point number witch is the min of 2*iter_num and the max iters of the ref_model_2 folder
+            filenames = [f for f in os.listdir(ref_model_ckpt_2) if f.startswith('ckpt-') and f.endswith('.pt')]
+            
+            ckpt_nums = [int(f.split('-')[1].split('.')[0]) for f in filenames]
+            ref_ckpt_num = min(2 * iter_num, max(ckpt_nums))
+            ref_ckpt_num = max(ref_ckpt_num, 10000)
+            ref_model_ckpt_2_name_tmp = os.path.join(ref_model_ckpt_2, f'ckpt-{ref_ckpt_num}.pt')
+            if ref_model_ckpt_2_name_tmp != ref_model_ckpt_2_name:
+                print(f"Loading new reference model 2 from {ref_model_ckpt_2_name_tmp}")
+                # delete the old ref_model to free up memory
+                ref_model.destroy()
+                del ref_model
+                ref_model = load_deepspeed_ref_model(ref_model_ckpt, ref_model_ckpt_2_name_tmp)
+                ref_model_ckpt_2_name = ref_model_ckpt_2_name_tmp
+
     if iter_num == 0 and eval_only:
         break
 
@@ -694,7 +717,7 @@ while True:
                     logits = model(X).logits
                 
                 if loss_type == 'distill':
-                    loss = get_loss_distill(logits, Y, ref_model, X, temperature, distill_ratio)
+                    loss = get_loss_distill(logits, Y, ref_model, X, temperature, distill_ratio, token_keep_ratio, distill_top_k)
 
                 elif loss_type == 'rho':
                     loss = get_loss_rho(logits, Y, ref_model, X, token_keep_ratio, 

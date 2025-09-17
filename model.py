@@ -509,117 +509,73 @@ def get_loss_rho(logits, targets, ref_model=None, idx=None, ratio=0.5, reverse_s
     return loss
 
 
-def get_loss_cls_rho(logits, targets, ref_model, idx, ratio, cluster_analyzer, feature_extractor, reverse_select):
-    # --- cluster analysis ---
+def get_token_select_indices(logits, targets, ref_logits, token_keep_ratio):
     with torch.no_grad():
-        #clean feature cache before extracting features
-        feature_extractor.features = {} 
-        # sort the tokens diff loss. Meanwhile, features are extracted from the reference model forward pass by hook. 
-        sorted_token_indices, diff_token_loss  = token_sort_rho(logits, targets, ref_model, idx)
-        # extract features for the input tokens
-        features = feature_extractor.extract_features(idx, do_forward=False)['features']['combined']  # shape = (b, t, n_features)
-        b, t, n_features = features.size() 
-        features = features.view(-1, n_features)  # flatten the features to (b*t, n_features)
-        # extract the token clusters
-        token_clusters = cluster_analyzer.predict(features)  # shape = (b*t, )
-        token_clusters = token_clusters.view(b, t)  # reshape to (b, t)
-    
-
-    # --- loss calculation, modified from get_loss_rho() ---
-    ignore_idx = -1 # the index of the token to ignore in the targets
-    if ref_model is not None: #selection tokens by rho-1 algorithm.
         b, t, vocab_size = logits.size()
-        #logits shape (b, t, vocab_size), targets shape (b, t), token_loss shape (b*t)
-        token_loss = F.cross_entropy(logits.view(-1, vocab_size), targets.view(-1), ignore_index=ignore_idx, reduction='none')
-        
-        # gather the average loss for the top-k tokens
-        ignore_mask = (targets.view(-1) == ignore_idx) # shape (b*t,)
-        loss = token_loss.masked_fill(ignore_mask, 0.0)  #shape (b*t,)
-        loss = loss.reshape(b, -1) # shape (b, t) 
-        loss = loss.gather(1, sorted_token_indices) # shape (b, t)
-
-        # accumulate the loss for the selected tokens
-        loss_accum = 0.0
-        n_tokens_accum = 0 
-        for i in range(b):
-            #NOTE --- below is main difference from get_loss_rho() ---
-            
-            # version 1: simple selection of top-k% tokens in each cluster
-            #loss_i = loss[i][targets[i]!=ignore_idx]  # shape (n_tokens_i,), where n_tokens_i is the number of valid tokens in the sample
-            #token_cluster_i = token_clusters[i][targets[i]!=ignore_idx]  # shape (n_tokens_i,)
-            #for j in range(cluster_analyzer.n_clusters):
-            #    if j in token_cluster_i:
-            #        n_tokens_i_j = (token_cluster_i == j).sum().item() # number of tokens in the cluster
-            #        n_tokens_i_j = int(ratio * n_tokens_i_j) # number of tokens to select from the cluster
-            #        if n_tokens_i_j > 0:
-            #            # get the loss for the selected tokens in the cluster
-            #            loss_i_j = loss_i[token_cluster_i == j]
-            #            loss_i_j = loss_i_j[:n_tokens_i_j] # select the top n
-            #            loss_accum += loss_i_j.sum()
-            #            n_tokens_accum += n_tokens_i_j
-
-            # version 2: select the top-k clusters by the average diff_token_loss
-            diff_cluster_loss = torch.bincount(token_clusters[i], weights=diff_token_loss[i], minlength=cluster_analyzer.n_clusters)  # shape (n_clusters,)
-            cluster_cnt = torch.bincount(token_clusters[i], minlength=cluster_analyzer.n_clusters)
-            diff_cluster_loss = diff_cluster_loss / cluster_cnt.clamp(min=1)  # avoid division by zero
-            # sort the clusters by the average diff_token_loss
-            sorted_cluster_indices = torch.argsort(diff_cluster_loss, descending=not reverse_select)  # shape (n_clusters,) 
-            n_tokens = int(ratio * t)  # number of tokens to select
-            n_tokens_accum = 0
-            for j in sorted_cluster_indices:  
-                if n_tokens_accum >= n_tokens:
-                    break
-                # get the tokens in the cluster j
-                mask_j = token_clusters[i] == j
-                n_tokens_i_j = mask_j.sum().item()
-                if n_tokens_i_j == 0:
-                    continue
-                n_tokens_i_j = min(n_tokens_i_j, n_tokens - n_tokens_accum)
-                if n_tokens_i_j > 0:
-                    # get the loss for the selected tokens in the cluster
-                    loss_i_j = loss[i][mask_j] # shape (n_tokens_i_j,)
-                    if reverse_select:
-                        loss_i_j = loss_i_j[-n_tokens_i_j:] # NOTE: selection inversed.
-                    else:
-                        loss_i_j = loss_i_j[:n_tokens_i_j]
-                    loss_accum += loss_i_j.sum()
-                    n_tokens_accum += n_tokens_i_j
+        token_loss = F.cross_entropy(logits.view(-1, vocab_size), targets.view(-1), reduction='none')
+        ref_token_loss = F.cross_entropy(ref_logits.view(-1, vocab_size), targets.view(-1), reduction='none')
+        diff_token_loss = token_loss - ref_token_loss # shape (b*t,)
+        diff_token_loss = diff_token_loss.view(b, -1) # reshape to (b, t)
+        sorted_diff_loss = torch.sort(diff_token_loss, descending=True, dim=1)
+        sorted_token_indices = sorted_diff_loss.indices #shape (b, t)
+        n_tokens = int(token_keep_ratio * t)  # number of tokens to select
+        selected_token_indices = sorted_token_indices[:, :n_tokens] # shape (b, n_tokens)
+        return selected_token_indices
 
 
-            # --- end of main difference from get_loss_rho() ---
-        # average the loss over the selected tokens
-        if n_tokens_accum == 0:
-            loss = torch.tensor(0.0, device=logits.device)
-        else:
-            loss = loss_accum / n_tokens_accum # average over the selected tokens
-    else:
-        # standard cross-entropy loss
-        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=ignore_idx)
-    return loss
-
-
-
-def get_loss_distill(logits, targets, ref_model, idx, temperature=2.0, distill_ratio=0.9):
+def get_loss_distill(logits, targets, ref_model, idx, temperature=2.0, distill_ratio=0.9, token_keep_ratio=1.0, distill_top_k=0):
     """ Model Distillation
     Calculate the loss given the logits and targets.
     If ref_model is provided, use it to calculate the reference logits for KL divergence.
     """
-    if ref_model is not None: #selection tokens by rho-1 algorithm.
-        b, t, vocab_size = logits.size()
+    if ref_model is not None: #Distill + (optionally) selection tokens by rho-1 algorithm.
         #logits shape (b, t, vocab_size), targets shape (b, t), token_loss shape (b*t)
-        hard_loss = F.cross_entropy(logits.view(-1, vocab_size), targets.view(-1), reduction='mean')
-
+        b, t, vocab_size = logits.size()
         with torch.no_grad():
             ref_model.eval()
             ref_logits = ref_model(idx).logits
             soft_targets = F.softmax(ref_logits.view(-1, vocab_size) / temperature, dim=-1)
+            if distill_top_k > 0:
+                # top-k filtering of the soft targets
+                topk = min(distill_top_k, vocab_size)
+                v, _ = torch.topk(ref_logits.view(-1, vocab_size), topk)
+                indices_to_remove = ref_logits.view(-1, vocab_size) < v[:, [-1]]
+                soft_targets = soft_targets.masked_fill(indices_to_remove, 0.0)
+                # renormalize
+                soft_targets = soft_targets / soft_targets.sum(dim=-1, keepdim=True)
 
+            #if distill_top_p > 0:
+            #    # top-p filtering of the soft targets
+            #    sorted_logits, sorted_indices = torch.sort(ref_logits.view(-1, vocab_size), descending=True, dim=-1)
+            #    cumulative_probs = torch.cumsum(F.softmax(sorted_logits / temperature, dim=-1), dim=-1)
+            #    sorted_indices_to_remove = cumulative_probs > distill_top_p
+            #    # shift the indices to the right to keep also the first token above the threshold
+            #    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+            #    sorted_indices_to_remove[..., 0] = 0
+            #    indices_to_remove = torch.zeros_like(soft_targets, dtype=torch.bool).scatter_(1, sorted_indices, sorted_indices_to_remove)
+            #    soft_targets = soft_targets.masked_fill(indices_to_remove, 0.0)
+            #    # renormalize
+            #    soft_targets = soft_targets / soft_targets.sum(dim=-1, keepdim=True)
+
+        # mle loss
+        hard_loss = F.cross_entropy(logits.view(-1, vocab_size), targets.view(-1), reduction='none') #shape (b*t,)
+
+        # distill loss
         soft_prob = F.log_softmax(logits.view(-1, vocab_size) / temperature, dim=-1)
-        kl_div = F.kl_div(soft_prob, soft_targets, reduction='batchmean')
+        kl_div = F.kl_div(soft_prob, soft_targets, reduction='none').sum(dim=-1) #shape (b*t,)
+
+        # weighted sum
         loss = hard_loss * (1 - distill_ratio) + kl_div * distill_ratio * (temperature ** 2)
 
+        # optionally select top-k tokens by rho-1 algorithm
+        if token_keep_ratio < 1.0:
+            selected_token_indices = get_token_select_indices(logits, targets, ref_logits, token_keep_ratio)
+            loss = loss.view(b, -1) # shape (b, t)
+            loss = loss.gather(1, selected_token_indices) # shape (b, n_tokens)
+        # average over the all tokens (or selected tokens if token_keep_ratio < 1.0)
+        loss = loss.mean()
     else:
         # standard cross-entropy loss
         # reshape logits and targets to be of shape (b*t, vocab_size) and (b*t,)
-        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=ignore_idx)
+        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
     return loss

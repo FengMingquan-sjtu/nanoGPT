@@ -9,7 +9,7 @@
 # pkill -f VLLM
 # fuser -v /dev/nvidia*
 
-model_path="out-prodcpfs/qwen2-0.5B-finewebedu"  #+cosmopedia  +nemotron  -distil-2.0-0.9
+model_path="out-prodcpfs/qwen2-0.5B-finewebedu-distil-2.0-0.9-top50-online/2025-09-16_22-32-12"  #+cosmopedia  +nemotron  -distil-2.0-0.9-0.9rho
 model_name="auto"  # Specify the model name
 batch_size=0  # Adjust batch size as needed, 0 for automatic selection
 block_size=4096  # Adjust block size as needed
@@ -17,15 +17,15 @@ n_shot_prompt=5  # Number of n-shot examples to include in the prompt
 backend="vllm"  # Backend to use for evaluation, options: "hflm", "vllm", "sglang"
 device="cuda"
 python_path="/cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/python"  # Path to the Python interpreter
-gpu_ratio=0.2  
+gpu_ratio=0.8  
 
 #--------------
 limit=1000000  # Maximum number of samples to evaluate (for quick testing)
 wandb_id="auto"  # Set to "auto" to automatically find the wandb ID from the log file
-gpu_id_base=4
+gpu_id_base=0
 node_id=0
 checkpoints=(
-    90000 100000 110000 120000
+    4000 8000 12000 16000 20000
 #     1000 2000 4000 6000 8000 10000 12000 16000
 #     16000
 #    0 1000 2000
@@ -36,7 +36,7 @@ checkpoints=(
 datasets=(
 #    "mmlu,arc_challenge,arc_easy,hellaswag,winogrande,mbpp,humaneval,gsm8k,gpqa_main_n_shot"
 #     "gsm8k,mmlu_pro"
-    "mmlu,arc_challenge,arc_easy,hellaswag,winogrande,piqa,openbookqa,gpqa_main_n_shot"
+    "arc_challenge,arc_easy,hellaswag,winogrande,piqa,openbookqa"
 )
 # mmlu,mmlu_pro,arc_challenge,arc_easy,gpqa_main_n_shot
 # hellaswag,winogrande,mbpp
