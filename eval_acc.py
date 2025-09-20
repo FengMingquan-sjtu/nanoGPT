@@ -82,7 +82,11 @@ def main():
     if args.backend == "hflm":
         from lm_eval.models.huggingface import HFLM
         print("Starting HFLM evaluation...")
-        eval_model=HFLM(pretrained=hf_model_path, tokenizer=hf_model_path),
+        eval_model=HFLM(
+            pretrained=hf_model_path, 
+            tokenizer=hf_model_path, 
+            truncation=True,
+            max_length=args.block_size,)
 
 
     elif args.backend == "vllm":
@@ -94,7 +98,8 @@ def main():
             gpu_memory_utilization= args.gpu_ratio, 
             trust_remote_code=True,
             dtype="auto",
-            max_model_len=args.block_size,
+            #max_model_len=args.block_size,
+            max_length=args.block_size,
             data_parallel_size=torch.cuda.device_count() if torch.cuda.is_available() else 1,
         )
         

@@ -17,7 +17,10 @@ num_proc_load_dataset = 40
 
 # Load tokenizer - 根据你的需求选择合适的tokenizer
 # 例如：gpt2, microsoft/DialoGPT-large, 或其他有大词汇表的模型
-tokenizer = AutoTokenizer.from_pretrained("/prodcpfs/user/fengmingquan/model/Qwen2-0.5B")  # 请根据需要修改模型名称
+#tokenizer = AutoTokenizer.from_pretrained("/prodcpfs/user/fengmingquan/model/Qwen2-0.5B")  # 请根据需要修改模型名称
+
+from hf_olmo import OLMoTokenizerFast
+tokenizer = OLMoTokenizerFast.from_pretrained("/prodcpfs/user/fengmingquan/model/OLMo-1B", trust_remote_code=True)
 
 # download data by:
 #input_path = "/prodcpfs/user/fengmingquan/dataset/raw/fineweb-edu/sample/10BT"
@@ -25,7 +28,8 @@ tokenizer = AutoTokenizer.from_pretrained("/prodcpfs/user/fengmingquan/model/Qwe
 #input_path = "/prodcpfs/user/fengmingquan/dataset/raw/fineweb-edu/sample/100BT-25BT"
 #output_path = "/prodcpfs/user/fengmingquan/dataset/processed-qwen2/fineweb-edu-100bt-25bt"
 input_path = "/oss/crawl/multimodal/HuggingFaceFW/fineweb-edu/sample/100BT/"
-output_path = "/prodcpfs/user/fengmingquan/dataset/processed-qwen2/fineweb-edu-100bt-20bt"
+#output_path = "/prodcpfs/user/fengmingquan/dataset/processed-qwen2/fineweb-edu-100bt-20bt"
+output_path = "/prodcpfs/user/fengmingquan/dataset/processed-olmo/fineweb-edu-100bt-17bt"
 total_batches = 1024  # 1024 for 10BT, 2048 for 25BT, 4096 for 100BT
 
 if not os.path.exists(output_path):
@@ -38,8 +42,18 @@ if __name__ == '__main__':
     print(f"EOS token ID: {tokenizer.eos_token_id}")
 
     #dataset = load_dataset(input_path, num_proc=num_proc_load_dataset)
+    if output_path.endswith('fineweb-edu-100bt-20bt'):
+        start, end = 75, 100  # 75~100
+    elif output_path.endswith('fineweb-edu-100bt-19bt'):
+        start, end = 50, 75  # 50~75
+    elif output_path.endswith('fineweb-edu-100bt-18bt'):
+        start, end = 25, 50  # 25~50
+    elif output_path.endswith('fineweb-edu-100bt-17bt'):
+        start, end = 0, 25  # 00~25
+    else:
+        raise ValueError("Please set the correct output_path ending to determine the data range to load.")
     data_files = []
-    for idx in range(75, 100):
+    for idx in range(start, end):  # 00~25, 25~50, 50~75, 75~100
         i = idx // 10
         j = idx % 10
         data_files.append(os.path.join(input_path, f'00{i}_0000{j}.parquet'))
