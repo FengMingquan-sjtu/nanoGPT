@@ -34,6 +34,7 @@ from model import GPTConfig, GPT
 from model import get_loss_rho, remove_prefix_from_state_dict, get_loss_distill
 from model import configure_AdamW_optimizer
 from dataloader import DistributedDataLoader
+from wrap_model_kinet import warp_qwen2_kinet
 
 os.environ["WANDB_API_KEY"] = "b7f26328382adc825eb193aac3f30f07e7da99c1" # set your wandb api key here
 os.environ['NCCL_TIMEOUT'] = '1800'  # 30分钟超时
@@ -440,8 +441,15 @@ else:
         state_dict = remove_prefix_from_state_dict(state_dict)
         model.load_state_dict(state_dict)
         iter_num = checkpoint['iter_num'] + 1
-model.to(device)
 
+if "kinet" in out_dir:
+    if "qwen2" in out_dir:
+        model = warp_qwen2_kinet(model)
+        print("Wrapped Qwen2 model with Kinet")
+    else:
+        raise NotImplementedError("Only Qwen2 model is supported for Kinet wrapping currently.")
+
+model.to(device)
 
 if use_deepspeed:
     import deepspeed
