@@ -30,7 +30,7 @@ from lm_eval import evaluator
 
 
 from eval_ppl import load_model, auto_parse_path
-
+from wrap_model_kinet import warp_qwen2_kinet
 
 os.environ["WANDB_API_KEY"] = "b7f26328382adc825eb193aac3f30f07e7da99c1" 
 os.environ["HF_ALLOW_CODE_EVAL"] = "1"
@@ -75,13 +75,26 @@ def main():
                        help='GPU memory utilization ratio for vllm (default: 0.8), 0.9 will cause OOM')
 
     args = parser.parse_args()
-    args = auto_parse_path(args)
+    
 
-    hf_model_path = os.path.join(args.model_path, f"ckpt-{args.ckpt_step}-hf")
+    if args.ckpt_step == 0:
+        hf_model_path = args.model_path
+    else:
+        args = auto_parse_path(args)
+        hf_model_path = os.path.join(args.model_path, f"ckpt-{args.ckpt_step}-hf")
 
     if args.backend == "hflm":
         from lm_eval.models.huggingface import HFLM
         print("Starting HFLM evaluation...")
+        
+        #if "-kinet" in hf_model_path and "qwen2" in hf_model_path:
+        #    model = AutoModelForCausalLM.from_pretrained(hf_model_path, trust_remote_code=True)
+        #    model = warp_qwen2_kinet(model)
+        #    print("Using KINET modified Qwen2 model.")
+        #    hf_model_path_ = model
+        #else:
+        #    hf_model_path_ = hf_model_path
+
         eval_model=HFLM(
             pretrained=hf_model_path, 
             tokenizer=hf_model_path, 
@@ -158,7 +171,11 @@ def main():
             print(f"Results saved to {args.output_file}")
         
         if args.wandb_id and args.wandb_id != "None":
-            wandb.init(id=args.wandb_id, resume='must', project="owm")
+            if args.ckpt_step == 0:
+                wandb_name = args.model_path.split('/')[-1]
+                wandb.init(project="owm", name=wandb_name,)
+            else:
+                wandb.init(id=args.wandb_id, resume='must', project="owm")
             for dataset_name, dataset_res in results['results'].items():
                 if not dataset_name in args.dataset_name.split(','):
                     continue
@@ -172,8 +189,9 @@ def main():
                         f'{dataset_name}/{key}': value,
                         'train_step': args.ckpt_step,
                     })
+            print(f"Results logged to WandB run {wandb.run.id}")
             wandb.finish()
-            print(f"Results logged to WandB run {args.wandb_id}")
+            
         else:
             print("WARNING: No WandB ID provided, no logging.")
 

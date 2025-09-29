@@ -72,6 +72,7 @@ distill_ratio = 0.9 # weight for distillation loss
 temperature = 2.0 # temperature for distillation
 distill_top_k = 0 # if > 0, use top-k distillation
 distill_online = False # if True, use online distillation, from ref_model_ckpt_2
+div_mode = "fkl" # divergence mode for distillation, "fkl" or "rkl"
 
 # loss type
 loss_type = 'distill' # 'rho' or 'distill'
@@ -113,6 +114,7 @@ backend = 'nccl' # 'nccl', 'gloo', etc.
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = False # use PyTorch 2.0 to compile the model to be faster
+gradient_checkpointing = True # use gradient checkpointing to save memory, but will be slower
 # Deepspeed
 use_deepspeed = True
 ref_use_deepspeed = True # use deepspeed for the reference model
@@ -401,9 +403,7 @@ model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=bloc
 #    model.crop_block_size(block_size)
 #    model_args['block_size'] = block_size # so that the checkpoint will have the right value
 
-if "gpt" in init_from:
-    
-    
+if "gpt" in init_from: # nanogpt model
     # initialize from OpenAI GPT-2 weights
     override_args = dict(dropout=dropout)
     
@@ -412,7 +412,7 @@ if "gpt" in init_from:
     # read off the created config params, so we can store them into checkpoint correctly
     for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
         model_args[k] = getattr(model.config, k)
-else:
+else: # huggingface model
     if train_mode == "cont_pretrain":
         model = AutoModelForCausalLM.from_pretrained(init_from)
         print(f"Loaded main model from {init_from}")
@@ -441,7 +441,9 @@ else:
         state_dict = remove_prefix_from_state_dict(state_dict)
         model.load_state_dict(state_dict)
         iter_num = checkpoint['iter_num'] + 1
-
+    if gradient_checkpointing:
+        print("Enabling gradient checkpointing")
+        model.gradient_checkpointing_enable()
 if "kinet" in out_dir:
     if "qwen2" in out_dir:
         model = warp_qwen2_kinet(model)
@@ -725,7 +727,7 @@ while True:
                     logits = model(X).logits
                 
                 if loss_type == 'distill':
-                    loss = get_loss_distill(logits, Y, ref_model, X, temperature, distill_ratio, token_keep_ratio, distill_top_k)
+                    loss = get_loss_distill(logits, Y, ref_model, X, temperature, distill_ratio, token_keep_ratio, distill_top_k, div_mode)
 
                 elif loss_type == 'rho':
                     loss = get_loss_rho(logits, Y, ref_model, X, token_keep_ratio, 

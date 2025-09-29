@@ -34,6 +34,8 @@ OMP_NUM_THREADS=8 nohup /cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/torc
 
 OMP_NUM_THREADS=8 nohup /cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/torchrun --standalone --nproc_per_node 8 train.py config/cont_train_gpt2_owm_rho.py --wandb_log=True --use_deepspeed=True --zero_stage=2 --wandb_run_name='qwen2-1.5B-finewebedu-distil-2.0-0.9-top50' --out_dir='out-prodcpfs/qwen2-1.5B-finewebedu-distil-2.0-0.9-top50' --init_from='/prodcpfs/user/fengmingquan/model/Qwen2-1.5B' --ref_model_ckpt='/prodcpfs/user/fengmingquan/model/Qwen2.5-3B'   --dataset='/prodcpfs/user/fengmingquan/dataset/processed-qwen2' --train_mode='scratch' --loss_type='distill' --distill_ratio=0.9 --temperature=2.0 --distill_top_k=50 --dataset_prefix="fineweb-edu-100bt,fineweb-edu-10bt" --dataset_ratio="50:0" --batch_size=2 --gradient_accumulation_steps=64 --block_size=4096 --token_keep_ratio=1.0 --max_iters=200000 --lr_decay_iters=200000 --learning_rate=6e-5 --min_lr=6e-6 > log/gpt-owm-rho-8.log 2>&1 &
 
+OMP_NUM_THREADS=8 nohup /cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/torchrun --standalone --nproc_per_node 8 train.py config/cont_train_gpt2_owm_rho.py --wandb_log=True --use_deepspeed=True --zero_stage=2 --wandb_run_name='qwen2-0.5B-finewebedu-distil-2.0-0.9-rkl' --out_dir='out-prodcpfs/qwen2-0.5B-finewebedu-distil-2.0-0.9-rkl' --init_from='/prodcpfs/user/fengmingquan/model/Qwen2-0.5B' --ref_model_ckpt='/prodcpfs/user/fengmingquan/model/Qwen2-1.5B'   --dataset='/prodcpfs/user/fengmingquan/dataset/processed-qwen2' --train_mode='scratch' --loss_type='distill' --div_mode="rkl" --distill_ratio=0.9 --temperature=2.0 --dataset_prefix="fineweb-edu-100bt,fineweb-edu-10bt" --dataset_ratio="50:0" --batch_size=3 --gradient_accumulation_steps=40 --block_size=4096 --token_keep_ratio=1.0 --max_iters=200000 --lr_decay_iters=200000 --learning_rate=6e-5 --min_lr=6e-6 > log/gpt-owm-rho-7.log 2>&1 &
+
 cd /cpfs/user/fengmingquan/nanoGPT
 
 ali-sg-acr-registry-vpc.ap-southeast-1.cr.aliyuncs.com/xhs-llm/xhs-llm:ngc-2403-taishan2
@@ -44,7 +46,12 @@ torchrun --standalone --nproc_per_node=8 train_nanogpt.py config/train_arithmeti
 
 juicefs sync -u -p 100 --exclude "00*.parquet" oss://LTAI5tDuCoTTh6gu5PK8gFfN:6eZGIEeLo81eRSqYRMHUEG2FcVTkQV@lsg-oss-chatgpt-agi-hcfs.oss-ap-southeast-1-internal.aliyuncs.com/crawl/multimodal/HuggingFaceFW/fineweb-edu/sample/100BT/ /prodcpfs/user/fengmingquan/dataset/raw/fineweb-edu/sample/100BT-25BT/
 
+juicefs sync -u -p 100 oss://LTAI5tDuCoTTh6gu5PK8gFfN:6eZGIEeLo81eRSqYRMHUEG2FcVTkQV@lsg-oss-chatgpt-agi-hcfs.oss-ap-southeast-1-internal.aliyuncs.com/crawl/multimodal/allenai/openbookqa /prodcpfs/user/fengmingquan/dataset/raw/openbookqa
+
 #git config --global user.email "fengmingquan@sjtu.edu.cn"
 #git config --global user.name "fengmingquan"
 
 ssh root@dsw-notebook-dsw-8eldzhg618bk32qyse-12534.vpc-t4nptn1gzsxxk04su5mpc.instance-forward.dsw.ap-southeast-1.aliyuncs.com -p 22
+
+
+nohup /cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/python test_infi.py > log/test_infi_0.log 2>&1 &

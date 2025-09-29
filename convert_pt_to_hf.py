@@ -26,6 +26,10 @@ def main():
     parser.add_argument('--wandb_id', type=str, default="auto",
                        help='WandB run id for logging')
     args = parser.parse_args()
+
+    if args.ckpt_step == 0:
+        print("warning: ckpt_step is 0, loading the huggingface checkpoint, not converting from pt checkpoint.")
+        return 
     
     args = auto_parse_path(args)
     hf_model_path = os.path.join(args.model_path, f"ckpt-{args.ckpt_step}-hf")

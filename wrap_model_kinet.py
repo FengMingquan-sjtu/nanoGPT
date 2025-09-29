@@ -180,6 +180,7 @@ def qwen2_decoder_forward_kinet(self,
         
         # ----New kinet connection----
         kinet = KINET_DSMC(max_channal=hidden_states.shape[1])
+        kinet.training = self.training
         hidden_states = kinet.forward(residual, hidden_states, hidden_states)
         # ----Modification end----
 

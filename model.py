@@ -523,7 +523,7 @@ def get_token_select_indices(logits, targets, ref_logits, token_keep_ratio):
         return selected_token_indices
 
 
-def get_loss_distill(logits, targets, ref_model, idx, temperature=2.0, distill_ratio=0.9, token_keep_ratio=1.0, distill_top_k=0):
+def get_loss_distill(logits, targets, ref_model, idx, temperature=2.0, distill_ratio=0.9, token_keep_ratio=1.0, distill_top_k=0, div_mode="fkl"):
     """ Model Distillation
     Calculate the loss given the logits and targets.
     If ref_model is provided, use it to calculate the reference logits for KL divergence.
@@ -542,7 +542,7 @@ def get_loss_distill(logits, targets, ref_model, idx, temperature=2.0, distill_r
                 indices_to_remove = ref_logits.view(-1, vocab_size) < v[:, [-1]]
                 soft_targets = soft_targets.masked_fill(indices_to_remove, 0.0)
                 # renormalize
-                soft_targets = soft_targets / soft_targets.sum(dim=-1, keepdim=True)
+                soft_targets = soft_targets / soft_targets.sum(dim=-1, keepdim=True) #shape (b*t, vocab_size)
 
             #if distill_top_p > 0:
             #    # top-p filtering of the soft targets
@@ -561,8 +561,14 @@ def get_loss_distill(logits, targets, ref_model, idx, temperature=2.0, distill_r
         hard_loss = F.cross_entropy(logits.view(-1, vocab_size), targets.view(-1), reduction='none') #shape (b*t,)
 
         # distill loss
-        soft_prob = F.log_softmax(logits.view(-1, vocab_size) / temperature, dim=-1)
-        kl_div = F.kl_div(soft_prob, soft_targets, reduction='none').sum(dim=-1) #shape (b*t,)
+        soft_log_prob = F.log_softmax(logits.view(-1, vocab_size) / temperature, dim=-1) #shape (b*t, vocab_size)
+        if div_mode == "rkl":
+            # reverse KL divergence, add small value to avoid nan
+            kl_div = F.kl_div(torch.log(soft_targets + 1e-8), soft_log_prob, reduction='none', log_target=True).sum(dim=-1) #shape (b*t,)
+
+        else:
+            # forward KL divergence (default)
+            kl_div = F.kl_div(soft_log_prob, soft_targets, reduction='none').sum(dim=-1) #shape (b*t,)
 
         # weighted sum
         loss = hard_loss * (1 - distill_ratio) + kl_div * distill_ratio * (temperature ** 2)
