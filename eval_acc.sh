@@ -11,13 +11,13 @@
 # pkill -f VLLM
 # fuser -v /dev/nvidia*
 
-#model_path="out-prodcpfs/qwen2-0.5B-finewebedu"  #+cosmopedia  +nemotron  -distil-2.0-0.9-0.9rho  -distil-2.0-0.9-top50
-model_path="/prodcpfs/user/fengmingquan/model/Qwen2-1.5B"
+model_path="out-prodcpfs/qwen2-0.5B-finewebedu-distil-2.0-0.9-top50"  #+cosmopedia  +nemotron  -distil-2.0-0.9-0.9rho  -distil-2.0-0.9-top50
+#model_path="/prodcpfs/user/fengmingquan/model/Qwen2-0.5B"
 model_name="auto"  # Specify the model name
 batch_size=0  # Adjust batch size as needed, 0 for automatic selection
 block_size=4096  # Adjust block size as needed
 
-backend="vllm"  # Backend to use for evaluation, options: "hflm", "vllm", "sglang"
+backend="hflm"  # Backend to use for evaluation, options: "hflm", "vllm", "sglang"
 device="cuda"
 python_path="/cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/python"  # Path to the Python interpreter
 gpu_ratio=0.8  
@@ -25,7 +25,7 @@ gpu_ratio=0.8
 #--------------
 limit=1000000  # Maximum number of samples to evaluate (for quick testing)
 wandb_id="auto"  # Set to "auto" to automatically find the wandb ID from the log file
-gpu_id_base=0
+gpu_id_base=1
 node_id=0
 
 n_shot_prompt=0  #ppl task use 0 shot; acc task use 5 shot
@@ -39,7 +39,8 @@ checkpoints=(
 #     2000 4000 8000 12000 16000 20000 30000 40000
 #     50000 60000 70000 80000 90000 100000 110000 120000
 #    130000 140000 150000 160000 170000 180000 190000 200000
-        0
+    200000
+#    206000 210000
 )
 datasets=(
 #    "mmlu,arc_challenge,arc_easy,hellaswag,winogrande,mbpp,humaneval,gsm8k,gpqa_main_n_shot"
@@ -48,10 +49,14 @@ datasets=(
 #    "hellaswag"
 #     "arc_challenge,arc_easy"
 #     "winogrande,piqa,openbookqa"
-#    "c4,pile_10k,wikitext"
+#    "c4,pile_10k,wikitext"  # need hflm backend
+    "c4"
+    "pile_10k"
+    "wikitext"
+#   "hellaswag_gpt_ppl,arc_challenge_gpt_ppl" 
 #    "hellaswag_ppl"
 #    "hellaswag_gpt_ppl"
-    "hellaswag_gpt_ppl,arc_challenge_gpt_ppl"
+#    "hellaswag_gpt_ppl,arc_challenge_gpt_ppl" 
 )
 # mmlu,mmlu_pro,arc_challenge,arc_easy,gpqa_main_n_shot
 # hellaswag,winogrande,mbpp

@@ -36,6 +36,10 @@ OMP_NUM_THREADS=8 nohup /cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/torc
 
 OMP_NUM_THREADS=8 nohup /cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/torchrun --standalone --nproc_per_node 8 train.py config/cont_train_gpt2_owm_rho.py --wandb_log=True --use_deepspeed=True --zero_stage=2 --wandb_run_name='qwen2-0.5B-finewebedu-distil-2.0-0.9-rkl' --out_dir='out-prodcpfs/qwen2-0.5B-finewebedu-distil-2.0-0.9-rkl' --init_from='/prodcpfs/user/fengmingquan/model/Qwen2-0.5B' --ref_model_ckpt='/prodcpfs/user/fengmingquan/model/Qwen2-1.5B'   --dataset='/prodcpfs/user/fengmingquan/dataset/processed-qwen2' --train_mode='scratch' --loss_type='distill' --div_mode="rkl" --distill_ratio=0.9 --temperature=2.0 --dataset_prefix="fineweb-edu-100bt,fineweb-edu-10bt" --dataset_ratio="50:0" --batch_size=3 --gradient_accumulation_steps=40 --block_size=4096 --token_keep_ratio=1.0 --max_iters=200000 --lr_decay_iters=200000 --learning_rate=6e-5 --min_lr=6e-6 > log/gpt-owm-rho-7.log 2>&1 &
 
+OMP_NUM_THREADS=8 nohup /cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/torchrun --standalone --nproc_per_node 8 train.py config/cont_train_gpt2_owm_rho.py --wandb_log=True --use_deepspeed=True --zero_stage=2 --wandb_run_name='qwen2-0.5B-finewebedu-distil-2.0-0.9-top50' --out_dir='out-prodcpfs/qwen2-0.5B-finewebedu-distil-2.0-0.9-top50' --init_from='/prodcpfs/user/fengmingquan/model/Qwen2-0.5B' --ref_model_ckpt=''   --dataset='/prodcpfs/user/fengmingquan/dataset/processed-qwen2' --train_mode='resume' --loss_type='rho' --dataset_prefix="fineweb-edu-100bt,fineweb-edu-10bt" --dataset_ratio="50:0" --batch_size=6 --gradient_accumulation_steps=24 --block_size=4096 --token_keep_ratio=1.0 --max_iters=210000 --lr_decay_iters=210000 --learning_rate=6e-5 --min_lr=6e-6 > log/gpt-owm-rho-7.log 2>&1 &
+
+OMP_NUM_THREADS=8 nohup /cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/torchrun --standalone --nproc_per_node 8 train.py config/cont_train_gpt2_owm_rho.py --wandb_log=True --use_deepspeed=True --zero_stage=2 --wandb_run_name='qwen2-0.5B-red' --out_dir='out-prodcpfs/qwen2-0.5B-red' --init_from='/prodcpfs/user/fengmingquan/model/Qwen2-0.5B' --ref_model_ckpt=''   --dataset='/prodcpfs/user/fengmingquan/dataset/processed-qwen2' --train_mode='scratch' --loss_type='distill' --dataset_prefix="red-1.0bt,fineweb-edu-10bt" --dataset_ratio="50:0" --batch_size=8 --gradient_accumulation_steps=16 --block_size=4096 --token_keep_ratio=1.0 --max_iters=12000 --lr_decay_iters=12000 --learning_rate=1e-4 --min_lr=1e-5 > log/gpt-owm-rho-4.log 2>&1 &
+
 cd /cpfs/user/fengmingquan/nanoGPT
 
 ali-sg-acr-registry-vpc.ap-southeast-1.cr.aliyuncs.com/xhs-llm/xhs-llm:ngc-2403-taishan2
@@ -55,3 +59,13 @@ ssh root@dsw-notebook-dsw-8eldzhg618bk32qyse-12534.vpc-t4nptn1gzsxxk04su5mpc.ins
 
 
 nohup /cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/python test_infi.py > log/test_infi_0.log 2>&1 &
+
+
+/cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/torchrun --standalone --nproc_per_node=8 /cpfs/user/fengmingquan/nanoGPT/infer_topk.py \
+  --model /cpfs/user/fengmingquan/nanoGPT/out-prodcpfs/qwen2-0.5B-red/2025-10-11_14-07-44 \
+  --dataset /prodcpfs/user/fengmingquan/dataset/processed-qwen2 \
+  --dataset_prefix "red-1.0bt" \
+  --split train \
+  --block_size 4096 \
+  --top_k 50 \
+  --out_dir /cpfs/user/fengmingquan/nanoGPT/infer_out

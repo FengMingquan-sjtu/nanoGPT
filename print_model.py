@@ -1,20 +1,25 @@
 import torch
+import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from rich.console import Console
 from rich.text import Text
+from rich.table import Table
 import warnings
 import argparse
+import math
 
 # 忽略一些不必要的警告信息
 warnings.filterwarnings("ignore")
 
 # --- 1. 配置区域 ---
+
 parse = argparse.ArgumentParser(description='Evaluate and visualize model token prediction accuracy')
 parse.add_argument('--model_names', type=str, required=False, 
                       help='Semicolon-separated list of model names or paths to evaluate',
-                      default="out-prodcpfs/qwen2-0.5B-finewebedu/2025-09-02_21-12-00/ckpt-200000-hf;out-prodcpfs/qwen2-0.5B-finewebedu-distil-2.0-0.9-top50/2025-09-10_12-22-54/ckpt-200000-hf")
+                      default="out-prodcpfs/qwen2-0.5B-finewebedu/2025-09-02_21-12-00/ckpt-200000-hf;out-prodcpfs/qwen2-0.5B-finewebedu-distil-2.0-0.9-top50/2025-09-10_12-22-54/ckpt-210000-hf")
 parse.add_argument("--k", type=int, default=50, help="Top-k value for prediction accuracy")
 parse.add_argument("--gpu_id", type=int, default=0, help="GPU ID to use")
+parse.add_argument("--compare_ppl", action="store_true", help="Compare PPL between first two models (requires at least 2 models)")
 args = parse.parse_args()
 MODEL_NAMES = args.model_names.split(";") # 要测试的模型列表 (请确保模型是Causal LM, 即用于生成任务的模型, 如GPT-2, Llama, Qwen等)
 
@@ -53,6 +58,164 @@ Either outcome would be monumental, scientists said."""
 K = args.k
 
 # --- End of Configuration ---
+
+
+def compare_ppl_and_visualize(model1, model2, tokenizer, text, device, model1_name, model2_name):
+    """
+    比较两个模型在给定文本上的token级别PPL（困惑度），并可视化结果。
+    
+    PPL更低的token表示模型对该token的预测更好。
+    - 如果model1的PPL < model2的PPL，标记为红色（model1更好）
+    - 否则标记为蓝色（model2更好或相同）
+
+    Args:
+        model1: 第一个模型。
+        model2: 第二个模型。
+        tokenizer: 已加载的分词器。
+        text (str): 要评估的语料。
+        device (str): "cuda" 或 "cpu"。
+        model1_name (str): 第一个模型的名称。
+        model2_name (str): 第二个模型的名称。
+    """
+    console = Console()
+    
+    # 最终要打印的带颜色的文本对象
+    text_to_print = Text()
+
+    # 对文本进行分词
+    inputs = tokenizer(text, return_tensors="pt").to(device)
+    input_ids = inputs.input_ids[0]
+
+    if len(input_ids) == 0:
+        console.print("[bold yellow]Warning: Corpus is empty or cannot be tokenized.[/bold yellow]")
+        return
+        
+    # 第一个token没有上下文来预测它，所以我们用默认颜色打印
+    first_token_str = tokenizer.decode(input_ids[0])
+    text_to_print.append(first_token_str)
+    
+    # 统计数据
+    model1_better_count = 0  # model1的PPL更低的次数
+    model2_better_count = 0  # model2的PPL更低的次数
+    total_predictions = len(input_ids) - 1
+    
+    total_ppl_model1 = 0.0
+    total_ppl_model2 = 0.0
+    
+    # 存储每个token的详细信息
+    token_details = []
+
+    # 从第二个token开始遍历，因为需要前面的token作为上下文
+    for i in range(1, len(input_ids)):
+        # 上下文是当前token之前的所有token
+        context_ids = input_ids[:i].unsqueeze(0)  # 添加batch维度
+        
+        # 目标token是当前token
+        target_id = input_ids[i].item()
+        
+        # 使用模型1进行预测
+        with torch.no_grad():
+            outputs1 = model1(input_ids=context_ids)
+            logits1 = outputs1.logits
+            next_token_logits1 = logits1[0, -1, :]
+            
+            # 计算概率分布
+            probs1 = F.softmax(next_token_logits1, dim=-1)
+            target_prob1 = probs1[target_id].item()
+            
+        # 使用模型2进行预测
+        with torch.no_grad():
+            outputs2 = model2(input_ids=context_ids)
+            logits2 = outputs2.logits
+            next_token_logits2 = logits2[0, -1, :]
+            
+            # 计算概率分布
+            probs2 = F.softmax(next_token_logits2, dim=-1)
+            target_prob2 = probs2[target_id].item()
+        
+        # 计算PPL（困惑度）= exp(-log(probability))
+        # 为了避免log(0)，添加一个很小的值
+        eps = 1e-10
+        ppl1 = math.exp(-math.log(target_prob1 + eps))
+        ppl2 = math.exp(-math.log(target_prob2 + eps))
+        
+        total_ppl_model1 += ppl1
+        total_ppl_model2 += ppl2
+        
+        # 解码当前token以供显示
+        current_token_str = tokenizer.decode(input_ids[i])
+        
+        # 存储token详细信息
+        token_details.append({
+            'index': i,
+            'token': current_token_str,
+            'ppl1': ppl1,
+            'ppl2': ppl2,
+            'model1_better': ppl1 < ppl2
+        })
+
+        # 比较PPL并着色
+        if ppl1 < ppl2:
+            # model1的PPL更低（model1更好），标记为红色
+            text_to_print.append(current_token_str, style="red")
+            model1_better_count += 1
+        else:
+            # model2的PPL更低或相同（model2更好），标记为蓝色
+            text_to_print.append(current_token_str, style="blue")
+            model2_better_count += 1
+
+    # 打印可视化结果
+    console.print(text_to_print)
+    
+    # 打印统计数据
+    if total_predictions > 0:
+        avg_ppl1 = total_ppl_model1 / total_predictions
+        avg_ppl2 = total_ppl_model2 / total_predictions
+        model1_better_ratio = (model1_better_count / total_predictions) * 100
+        model2_better_ratio = (model2_better_count / total_predictions) * 100
+        
+        console.print(f"\n[bold]PPL Comparison Statistics:[/bold]")
+        console.print(f"  - Total Tokens Compared: {total_predictions}")
+        console.print(f"  - [red]Model1 Better (Red)[/red]: {model1_better_count} ({model1_better_ratio:.2f}%)")
+        console.print(f"  - [blue]Model2 Better (Blue)[/blue]: {model2_better_count} ({model2_better_ratio:.2f}%)")
+        console.print(f"  - Model1 Average PPL: {avg_ppl1:.4f}")
+        console.print(f"  - Model2 Average PPL: {avg_ppl2:.4f}")
+        console.print(f"\n  Model1: {model1_name}")
+        console.print(f"  Model2: {model2_name}")
+        
+        # 创建详细的PPL对比表格
+        console.print(f"\n[bold]Detailed Token-level PPL Comparison:[/bold]")
+        table = Table(show_header=True, header_style="bold magenta")
+        table.add_column("Index", style="dim", width=6)
+        table.add_column("Token", width=20)
+        table.add_column("Model1 PPL", justify="right", width=12)
+        table.add_column("Model2 PPL", justify="right", width=12)
+        table.add_column("Diff (M1-M2)", justify="right", width=12)
+        table.add_column("Better", justify="center", width=10)
+        
+        # 添加每个token的数据行
+        for detail in token_details:
+            diff = detail['ppl1'] - detail['ppl2']
+            better = "[red]Model1[/red]" if detail['model1_better'] else "[blue]Model2[/blue]"
+            
+            # 使用颜色标记差异
+            if detail['model1_better']:
+                diff_str = f"[red]{diff:+.4f}[/red]"
+            else:
+                diff_str = f"[blue]{diff:+.4f}[/blue]"
+            
+            table.add_row(
+                str(detail['index']),
+                detail['token'].replace('\n', '\\n')[:20],  # 限制token显示长度
+                f"{detail['ppl1']:.4f}",
+                f"{detail['ppl2']:.4f}",
+                diff_str,
+                better
+            )
+        
+        console.print(table)
+    else:
+        console.print("\n[bold]Statistics:[/bold]\n  - No tokens to compare.")
 
 
 def evaluate_and_visualize(model, tokenizer, text, k, device):
@@ -144,24 +307,68 @@ def main():
         device = f"cuda:{args.gpu_id}"
     print(f"Using device: {device}\n")
 
-    for model_name in MODEL_NAMES:
+    # PPL比较模式
+    if args.compare_ppl:
+        if len(MODEL_NAMES) < 2:
+            console = Console()
+            console.print("[bold red]Error: PPL comparison mode requires at least 2 models.[/bold red]")
+            console.print(f"[bold yellow]You provided {len(MODEL_NAMES)} model(s).[/bold yellow]")
+            return
+        
         console = Console()
-        console.print(f"--- Evaluating Model: [bold cyan]{model_name}[/bold cyan] with top-k={K} ---")
-
+        model1_name = MODEL_NAMES[0]
+        model2_name = MODEL_NAMES[1]
+        
+        console.print(f"--- Comparing PPL between two models ---")
+        console.print(f"  Model 1: [bold cyan]{model1_name}[/bold cyan]")
+        console.print(f"  Model 2: [bold cyan]{model2_name}[/bold cyan]")
+        console.print(f"  [red]Red tokens[/red]: Model 1 has lower PPL (better)")
+        console.print(f"  [blue]Blue tokens[/blue]: Model 2 has lower PPL (better)\n")
+        
         try:
-            # 加载模型和分词器
-            print(f"Loading {model_name}...")
+            # 加载分词器
+            print(f"Loading tokenizer from {tokenizer_name}...")
             tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
-            model = AutoModelForCausalLM.from_pretrained(model_name).to(device)
-            model.eval()  # 设置为评估模式
-
-            # 运行评估和可视化
-            evaluate_and_visualize(model, tokenizer, CORPUS, K, device)
-            print("\n" * 2) # 添加一些空行以分隔
-
+            
+            # 加载模型1
+            print(f"Loading Model 1: {model1_name}...")
+            model1 = AutoModelForCausalLM.from_pretrained(model1_name).to(device)
+            model1.eval()
+            
+            # 加载模型2
+            print(f"Loading Model 2: {model2_name}...")
+            model2 = AutoModelForCausalLM.from_pretrained(model2_name).to(device)
+            model2.eval()
+            
+            print("Starting PPL comparison...\n")
+            
+            # 运行PPL比较和可视化
+            compare_ppl_and_visualize(model1, model2, tokenizer, CORPUS, device, model1_name, model2_name)
+            
         except Exception as e:
-            console.print(f"[bold red]Error processing model {model_name}: {e}[/bold red]\n")
+            console.print(f"[bold red]Error during PPL comparison: {e}[/bold red]\n")
+    
+    # 原有的逐个模型评估模式
+    else:
+        for model_name in MODEL_NAMES:
+            console = Console()
+            console.print(f"--- Evaluating Model: [bold cyan]{model_name}[/bold cyan] with top-k={K} ---")
+
+            try:
+                # 加载模型和分词器
+                print(f"Loading {model_name}...")
+                tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+                model = AutoModelForCausalLM.from_pretrained(model_name).to(device)
+                model.eval()  # 设置为评估模式
+
+                # 运行评估和可视化
+                evaluate_and_visualize(model, tokenizer, CORPUS, K, device)
+                print("\n" * 2) # 添加一些空行以分隔
+
+            except Exception as e:
+                console.print(f"[bold red]Error processing model {model_name}: {e}[/bold red]\n")
 
 if __name__ == "__main__":
     main()
     
+    # /cpfs/user/fengmingquan/miniconda3/envs/nanogpt/bin/python print_model.py --compare_ppl

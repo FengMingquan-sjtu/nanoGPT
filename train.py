@@ -790,6 +790,7 @@ while True:
 
     # termination conditions
     if iter_num > max_iters:
+        print(f"Reached max_iters: {max_iters}, stopping training")
         break
 
 if ddp:
