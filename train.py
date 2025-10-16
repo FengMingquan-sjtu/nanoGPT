@@ -31,10 +31,11 @@ from transformers import AutoModelForCausalLM, AutoConfig
 import torch.nn.functional as F
 
 from model import GPTConfig, GPT
-from model import get_loss_rho, remove_prefix_from_state_dict, get_loss_distill
+from model import get_loss_rho, remove_prefix_from_state_dict, get_loss_distill, get_loss_ensemble_distill
 from model import configure_AdamW_optimizer
 from dataloader import DistributedDataLoader
 from wrap_model_kinet import warp_qwen2_kinet
+from save_load_topk_probs import TopkProbsLoader
 
 os.environ["WANDB_API_KEY"] = "b7f26328382adc825eb193aac3f30f07e7da99c1" # set your wandb api key here
 os.environ['NCCL_TIMEOUT'] = '1800'  # 30分钟超时
@@ -55,7 +56,11 @@ eval_iters = 200
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 init_from = ''  # model name or path
-train_mode = 'cont_pretrain' # 'scratch' or 'resume' or 'cont_pretrain'
+train_mode = 'cont_pretrain' # 'scratch' or 'resume' or 'cont_pretrain' or 'infer_topk_probs'
+#topk probs
+topk_probs_dir = '' # directory to save&load topk probs
+ensemble_topk_probs_dirs = "" # directories of the topk probs to ensemble, separated by commas
+np_seed = 42 # seed for np.random
 # token selection
 ref_model_ckpt = "" # reference model file, used for data selection or distillation
 ref_model_ckpt_2 = "" # second reference model file, used for data selection or distillation
@@ -75,7 +80,8 @@ distill_online = False # if True, use online distillation, from ref_model_ckpt_2
 div_mode = "fkl" # divergence mode for distillation, "fkl" or "rkl"
 
 # loss type
-loss_type = 'distill' # 'rho' or 'distill'
+loss_type = 'distill' # 'rho' or 'distill' or 'ensemble_distill'
+
 
 # wandb logging
 wandb_log = False # disabled by default
@@ -128,6 +134,7 @@ local_rank= int(os.environ.get('LOCAL_RANK', 0)) # for deepspeed, this is the lo
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open('configurator.py').read()) # overrides from command line or config file
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
+np.random.seed(np_seed)
 # -----------------------------------------------------------------------------
 if int(os.environ.get('RANK', -1)) <= 0:
     if train_mode != 'resume':
@@ -326,15 +333,7 @@ def get_batch(split, dataset_ratio_i=None):
         datasubset_freq = np.array([os.path.getsize(os.path.join(f, f'train.bin')) for f in datasubset_folders])
         datasubset_idx = np.random.choice(len(datasubset_freq), p=datasubset_freq/datasubset_freq.sum())
         datasubset_folder_i = datasubset_folders[datasubset_idx]
-        # We recreate np.memmap every batch to avoid a memory leak, as per
-        # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
-        #if split == 'train':
-        #    data = np.memmap(os.path.join(datasubset_folder_i, 'train.bin'), dtype=data_dtype, mode='r')
-        #else:
-        #    data = np.memmap(os.path.join(datasubset_folder_i, 'val.bin'), dtype=data_dtype, mode='r')
-        #ix = torch.randint(len(data) - block_size, (1,))
-        #x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
-        #y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
+
         path_ = os.path.join(datasubset_folder_i, f'{split}.bin')
         dataloader_ = dataloader_dict[path_]
         x, y = dataloader_.next_batch()
@@ -365,43 +364,7 @@ if os.path.exists(meta_path):
 # model init
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
                   bias=bias, vocab_size=None, dropout=dropout) # NOTE: depracated. only for ckpt format compatibility
-#if init_from == 'scratch':
-#    # init a new model from scratch
-#    print("Initializing a new model from scratch")
-#    # determine the vocab size we'll use for from-scratch training
-#    if meta_vocab_size is None:
-#        print("defaulting to vocab_size of GPT-2 to 50304 (50257 rounded up for efficiency)")
-#    model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else 50304
-#    gptconf = GPTConfig(**model_args)
-#    model = GPT(gptconf)
-#elif init_from == 'resume':
-#    print(f"Resuming training from {out_dir}")
-#    # resume training from a checkpoint.
-#    ckpt_path = os.path.join(out_dir, 'ckpt.pt')
-#    checkpoint = torch.load(ckpt_path, map_location=device)
-#    checkpoint_model_args = checkpoint['model_args']
-#    # force these config attributes to be equal otherwise we can't even resume training
-#    # the rest of the attributes (e.g. dropout) can stay as desired from command line
-#    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
-#        model_args[k] = checkpoint_model_args[k]
-#    # create the model
-#    gptconf = GPTConfig(**model_args)
-#    model = GPT(gptconf)
-#    state_dict = checkpoint['model']
-#    model.load_ckp_state_dict(state_dict)
-#    iter_num = checkpoint['iter_num']
-#elif init_from.startswith('gpt2'):
-#    print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
-#    # initialize from OpenAI GPT-2 weights
-#    override_args = dict(dropout=dropout)
-#    model = GPT.from_pretrained(init_from, override_args)
-#    # read off the created config params, so we can store them into checkpoint correctly
-#    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
-#        model_args[k] = getattr(model.config, k)
-## crop down the model block size if desired, using model surgery
-#if block_size < model.config.block_size:
-#    model.crop_block_size(block_size)
-#    model_args['block_size'] = block_size # so that the checkpoint will have the right value
+
 
 if "gpt" in init_from: # nanogpt model
     # initialize from OpenAI GPT-2 weights
@@ -441,6 +404,21 @@ else: # huggingface model
         state_dict = remove_prefix_from_state_dict(state_dict)
         model.load_state_dict(state_dict)
         iter_num = checkpoint['iter_num'] + 1
+    elif train_mode == "infer_topk_probs":
+        ckpts = [f for f in os.listdir(out_dir) if f.startswith('ckpt') and f.endswith('.pt')]
+        ckpt = sorted(ckpts, key=lambda x: int(x.lstrip('ckpt-').rstrip('.pt')))[-1]
+        print(f"Resuming from checkpoint {ckpt} for infer_topk_probs")
+        ckpt_path = os.path.join(out_dir, ckpt)
+        checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
+        model_config = AutoConfig.from_pretrained(init_from)
+        model = AutoModelForCausalLM.from_pretrained(init_from, config=model_config)
+        state_dict = checkpoint['model']
+        state_dict = remove_prefix_from_state_dict(state_dict)
+        model.load_state_dict(state_dict)
+        iter_num = 0
+        topk_probs_loader = TopkProbsLoader(topk_probs_dir, distill_top_k)
+    else:
+        raise NotImplementedError(f"Train mode {train_mode} is not implemented")
     if gradient_checkpointing:
         print("Enabling gradient checkpointing")
         model.gradient_checkpointing_enable()
@@ -490,23 +468,7 @@ if use_deepspeed:
 
 # load reference model checkpoint, used for data selection
 ref_model = None
-#if len(ref_model_ckpt)>0 and mask_select==0:
-#    print(f"Loading reference model from {ref_model_ckpt}")
-#    if ref_model_ckpt.endswith('.pt'):
-#        # resume training from a checkpoint.
-#        ref_checkpoint = torch.load(ref_model_ckpt, map_location=device)
-#        ref_model_args = ref_checkpoint['model_args']
-#        # create the model
-#        ref_gptconf = GPTConfig(**ref_model_args)
-#        ref_model = GPT(ref_gptconf)
-#        ref_state_dict = ref_checkpoint['model']
-#        ref_model.load_ckp_state_dict(ref_state_dict)
-#    else:
-#        # load from a pretrained model
-#        override_args = dict(dropout=dropout)
-#        ref_model = GPT.from_pretrained(ref_model_ckpt, override_args)
-#    ref_model.to(device)
-#    ref_model.eval()
+
 
 def load_deepspeed_ref_model(ref_model_ckpt_, ref_model_ckpt_2=""):
     ref_model = None
@@ -660,6 +622,9 @@ local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if hasattr(model, 'module') else model # the raw model without DDP wrapper
 running_mfu = -1.0
 ref_model_ckpt_2_name = ""
+if loss_type == 'ensemble_distill':
+    ensemble_topk_probs_dirs = ensemble_topk_probs_dirs.split(';')
+    ensemble_topk_probs_loaders = [TopkProbsLoader(dir, distill_top_k) for dir in ensemble_topk_probs_dirs]
 while True:
 
     # determine and set the learning rate for this iteration
@@ -673,7 +638,7 @@ while True:
             frac = min(iter_num / 300, 1) # momentum warmup for muon
             param_group["momentum"] = (1 - frac) * 0.85 + frac * 0.95
     # evaluate the loss on train/val sets and write checkpoints
-    if (iter_num % eval_interval == 0 or iter_num==eval_interval//2) and master_process:
+    if (iter_num % eval_interval == 0 or iter_num==eval_interval//2) and master_process and train_mode != "infer_topk_probs":
         losses = estimate_loss()
         log_dict = {"lr": lr, "mfu": running_mfu*100,}
         for i, dataset_prefix_i in enumerate(dataset_prefix.split(',')):
@@ -697,7 +662,7 @@ while True:
             torch.save(checkpoint, os.path.join(out_folder, f'ckpt-{iter_num}.pt'))
 
 
-    if (iter_num % eval_interval == 0 or iter_num==eval_interval//2): # for all processes   
+    if (iter_num % eval_interval == 0 or iter_num==eval_interval//2) and train_mode != "infer_topk_probs": # for all processes   
         if loss_type == 'distill' and distill_online:
             # get the check point number witch is the min of 2*iter_num and the max iters of the ref_model_2 folder
             filenames = [f for f in os.listdir(ref_model_ckpt_2) if f.startswith('ckpt-') and f.endswith('.pt')]
@@ -720,56 +685,46 @@ while True:
 
     if use_deepspeed:
         for micro_step in range(gradient_accumulation_steps):
-            with ctx:
-                if init_from.startswith('gpt2'):
-                    logits, _ = model(X, Y)
-                else:
+            if train_mode == "infer_topk_probs":
+                with torch.no_grad():
                     logits = model(X).logits
-                
-                if loss_type == 'distill':
-                    loss = get_loss_distill(logits, Y, ref_model, X, temperature, distill_ratio, token_keep_ratio, distill_top_k, div_mode)
+                topk_probs_loader.save_topk_probs(logits, X, Y)
+                X, Y = get_batch('train')       
+            
+            elif loss_type == 'ensemble_distill':
+                with ctx:
+                    loss = get_loss_ensemble_distill(model, ensemble_topk_probs_loaders, distill_ratio, batch_size)
+                model.backward(loss)
+                model.step()
 
-                elif loss_type == 'rho':
-                    loss = get_loss_rho(logits, Y, ref_model, X, token_keep_ratio, 
-                                reverse_select, batch_select, scale_select, 
-                                mask_select, value_select, ref_model_2, 
-                                smooth_kernel_size, attn_select)
-                else:
-                    raise ValueError(f"Unknown loss_type: {loss_type}")
+            else:
+                with ctx:
+                    if init_from.startswith('gpt2'):
+                        logits, _ = model(X, Y)
+                    else:
+                        logits = model(X).logits
+                    
+                    
+                    
+                    if loss_type == 'distill':
+                        loss = get_loss_distill(logits, Y, ref_model, X, temperature, distill_ratio, token_keep_ratio, distill_top_k, div_mode)
+
+                    elif loss_type == 'rho':
+                        loss = get_loss_rho(logits, Y, ref_model, X, token_keep_ratio, 
+                                    reverse_select, batch_select, scale_select, 
+                                    mask_select, value_select, ref_model_2, 
+                                    smooth_kernel_size, attn_select)
+                    else:
+                        raise ValueError(f"Unknown loss_type: {loss_type}")
                 
-            model.backward(loss)
-            X, Y = get_batch('train')
-        
-            model.step() # NOTE: needs to be called inside the micro_step loop in deepspeed
+                
+                model.backward(loss)
+                X, Y = get_batch('train')       
+                model.step() # NOTE: needs to be called inside the micro_step loop in deepspeed
+
     else:
         raise NotImplementedError("Only deepspeed is supported now.")
-        # forward backward update, with optional gradient accumulation to simulate larger batch size
-        # and using the GradScaler if data type is float16
-        for micro_step in range(gradient_accumulation_steps):
-            if ddp:
-                model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
-            with ctx:
-                model.train() 
-                if init_from.startswith('gpt2'):
-                    logits, _ = model(X, Y)
-                else:
-                    logits = model(X).logits
-                
-                loss = get_loss_rho(logits, Y, ref_model, X, token_keep_ratio, reverse_select, batch_select, scale_select, mask_select, value_select, ref_model_2, smooth_kernel_size, attn_select)
-                loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
-            # immediately async prefetch next batch while model is doing the forward pass on the GPU
-            X, Y = get_batch('train')
-            # backward pass, with gradient scaling if training in fp16
-            scaler.scale(loss).backward()
-        # clip the gradient
-        if grad_clip != 0.0:
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-        # step the optimizer and scaler if training in fp16
-        scaler.step(optimizer)
-        scaler.update()
-        # flush the gradients as soon as we can, no need for this memory anymore
-        optimizer.zero_grad(set_to_none=True)
+        
 
     # timing and logging
     t1 = time.time()
@@ -778,7 +733,10 @@ while True:
     if iter_num % log_interval == 0 and master_process:
         # get loss as float. note: this is a CPU-GPU sync point
         # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
-        lossf = loss.item() if use_deepspeed else loss.item() * gradient_accumulation_steps
+        if train_mode == "infer_topk_probs":
+            lossf = 0
+        else:
+            lossf = loss.item() if use_deepspeed else loss.item() * gradient_accumulation_steps
         if local_iter_num >= 5: # let the training loop settle a bit
             #mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
             #running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu

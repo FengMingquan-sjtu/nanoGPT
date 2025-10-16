@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
+import numpy as np
 
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
@@ -585,3 +586,83 @@ def get_loss_distill(logits, targets, ref_model, idx, temperature=2.0, distill_r
         # reshape logits and targets to be of shape (b*t, vocab_size) and (b*t,)
         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
     return loss
+
+
+def get_loss_ensemble_distill(model, ensemble_topk_probs_loaders, distill_ratio, batch_size):
+    """ Ensemble Distillation
+    Calculate the loss given the logits and targets.
+    If ensemble_topk_probs_loaders is provided, use it to calculate the reference logits for KL divergence.
+    """
+    # load the latest saved top-k probs from each loader and build dense distributions
+    latest_items = []
+    rand_seed = np.random.randint(0, 1000000)
+    for loader in ensemble_topk_probs_loaders:
+        last_item = loader.load_topk_probs_step(batch_size, rand_seed)
+        if last_item is None:
+            raise RuntimeError("No top-k probability files found for one of the ensemble loaders.")
+        latest_items.append(last_item)
+
+    # use X, Y, vocab_size from the first item; verify shapes match across ensemble members
+    X = latest_items[0]['X']
+    Y = latest_items[0]['Y']
+    vocab_size = latest_items[0]['vocab_size']
+    B, T = X.shape
+    assert X.shape[0] == batch_size
+
+    for it in latest_items[1:]:
+        assert it['X'].shape == X.shape and it['Y'].shape == Y.shape, "Mismatched X/Y shapes across ensemble loaders"
+        assert it['vocab_size'] == vocab_size, "Mismatched vocab sizes across ensemble loaders"
+        # check X == it['X'] for all items in latest_items
+        assert torch.all(X == it['X']), "Mismatched X across ensemble loaders"
+
+    # infer device from model parameters
+    try:
+        model_device = next(model.parameters()).device
+    except Exception:
+        # DeepSpeed engine exposes .module.parameters(); fall back to X's device later if needed
+        model_device = X.device if hasattr(X, 'device') else torch.device('cpu')
+
+    # move X, Y to model device
+    X = X.to(model_device)
+    Y = Y.to(model_device)
+
+    # reconstruct dense probs for each teacher and average
+    dense_probs_list = []
+    for it in latest_items:
+        probs = it['probs']        # (B, T, K)
+        indices = it['indices']    # (B, T, K)
+        K = probs.shape[-1]
+
+        probs_flat = probs.view(-1, K)               # (B*T, K)
+        indices_flat = indices.view(-1, K)           # (B*T, K)
+        dense = torch.zeros((B * T, vocab_size), dtype=probs.dtype)
+        dense.scatter_(1, indices_flat, probs_flat)
+        dense = dense.view(B, T, vocab_size)         # (B, T, V)
+        dense_probs_list.append(dense)
+
+    with torch.no_grad():
+        ensemble_probs = torch.stack(dense_probs_list, dim=0).mean(dim=0)  # (B, T, V)
+
+    ensemble_probs = ensemble_probs.to(model_device)
+    # forward current model on X to get logits
+    if hasattr(model, 'forward'):
+        outputs = model(X)
+        logits = outputs.logits if hasattr(outputs, 'logits') else outputs[0]
+    else:
+        raise RuntimeError("Provided model does not have a forward method compatible with transformers outputs.")
+
+    V = logits.size(-1)
+    assert V == vocab_size, "Model vocab size does not match ensemble vocab size"
+
+    # MLE loss per token
+    hard_loss = F.cross_entropy(logits.view(-1, V), Y.view(-1), reduction='none')  # (B*T,)
+
+    # Distillation KL (forward KL)
+    soft_log_prob = F.log_softmax(logits.view(-1, V), dim=-1)                     # (B*T, V)
+    kl = F.kl_div(soft_log_prob, ensemble_probs.view(-1, V), reduction='none').sum(dim=-1)  # (B*T,)
+
+    # Weighted sum and mean over tokens
+    loss = hard_loss * (1 - distill_ratio) + kl * distill_ratio
+    loss = loss.mean()
+    return loss
+        
