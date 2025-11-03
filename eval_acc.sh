@@ -11,7 +11,13 @@
 # pkill -f VLLM
 # fuser -v /dev/nvidia*
 
-model_path="out-prodcpfs/qwen2-0.5B-finewebedu-distil-2.0-0.9-top50"  #+cosmopedia  +nemotron  -distil-2.0-0.9-0.9rho  -distil-2.0-0.9-top50
+model_path="out-prodcpfs/qwen2-1.5B-finewebedu-distil-2.0-0.9-top50-dynamic-lr/2025-10-23_19-51-07"
+#model_path="out-prodcpfs/qwen2-0.5B-red/2025-10-21_15-40-42"
+#model_path="out-prodcpfs/qwen2-0.5B-red-esb5/2025-10-17_11-46-17"
+#model_path="out-prodcpfs/qwen2-0.5B-red/2025-10-11_14-07-44;out-prodcpfs/qwen2-0.5B-red/2025-10-11_13-23-20;out-prodcpfs/qwen2-0.5B-red/2025-10-11_11-13-19;out-prodcpfs/qwen2-0.5B-red/2025-10-11_12-55-18;out-prodcpfs/qwen2-0.5B-red/2025-10-11_00-21-39"
+#model_path="out-prodcpfs/qwen2-0.5B-finewebedu-distil-2.0-0.9-top50"
+#model_path="out-prodcpfs/qwen2-0.5B-red-esb5/2025-10-17_00-23-29"
+#model_path="out-prodcpfs/qwen2-0.5B-red/2025-10-11_00-21-39"  #+cosmopedia  +nemotron  -distil-2.0-0.9-0.9rho  -distil-2.0-0.9-top50
 #model_path="/prodcpfs/user/fengmingquan/model/Qwen2-0.5B"
 model_name="auto"  # Specify the model name
 batch_size=0  # Adjust batch size as needed, 0 for automatic selection
@@ -25,7 +31,7 @@ gpu_ratio=0.8
 #--------------
 limit=1000000  # Maximum number of samples to evaluate (for quick testing)
 wandb_id="auto"  # Set to "auto" to automatically find the wandb ID from the log file
-gpu_id_base=2
+gpu_id_base=0
 node_id=0
 
 n_shot_prompt=5  #ppl task use 0 shot; acc task use 5 shot
@@ -36,19 +42,22 @@ checkpoints=(
 #    4000 8000 10000 20000 30000 40000 50000 60000
 #     40000 50000 60000 70000 80000 90000 100000 110000
 #     64000 70000 74000 80000 84000 90000 94000 100000
-#     2000 4000 8000 12000 16000 20000 30000 40000
+     2000 4000 8000 12000 16000 20000 30000 40000
 #     50000 60000 70000 80000 90000 100000 110000 120000
 #    130000 140000 150000 160000 170000 180000 190000 200000
-    200000 210000
+    
 #    206000 210000
 )
 datasets=(
 #    "mmlu,arc_challenge,arc_easy,hellaswag,winogrande,mbpp,humaneval,gsm8k,gpqa_main_n_shot"
 #     "gsm8k,mmlu_pro"
-#    "arc_challenge,arc_easy,hellaswag,winogrande,piqa,openbookqa"
-    "hellaswag"
-     "arc_challenge,arc_easy"
-     "winogrande,piqa,openbookqa"
+    "arc_challenge,arc_easy,hellaswag,winogrande,piqa,openbookqa"
+#    "hellaswag"
+#    "arc_challenge,arc_easy"
+#    "winogrande,piqa,openbookqa"
+    #"winogrande"
+    #"piqa"
+    #"openbookqa"
 #    "c4,pile_10k,wikitext"  # need hflm backend
 #    "c4"
 #    "pile_10k"
@@ -65,10 +74,19 @@ datasets=(
 # humaneval,mbpp
 # hendrycks_math,gsm8k
 for i in "${!checkpoints[@]}"; do
-    $python_path convert_pt_to_hf.py --model_path $model_path --ckpt_step ${checkpoints[$i]} --model_name $model_name
+    
+    if [[ "$model_path" == *";"* ]]; then  #ensemble model
+        model_paths=(${model_path//;/ })
+        for model_path_i in "${model_paths[@]}"; do
+            $python_path convert_pt_to_hf.py --model_path $model_path_i --ckpt_step ${checkpoints[$i]} --model_name $model_name
+        done
+    else #single model
+        $python_path convert_pt_to_hf.py --model_path $model_path --ckpt_step ${checkpoints[$i]} --model_name $model_name
+    fi
+    
     for j in "${!datasets[@]}"; do
         dataset_name=${datasets[$j]}
-        gpu_id=$((gpu_id_base + j + i))
+        gpu_id=$((gpu_id_base + i*${#datasets[@]} + j))
         echo "Evaluating checkpoint ${checkpoints[$i]} on dataset $dataset_name with GPU ID $gpu_id"
         output_file="log/eval_acc_${checkpoints[$i]}_$gpu_id-$node_id.out"
         echo "Output will be saved to $output_file"

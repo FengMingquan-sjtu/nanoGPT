@@ -593,7 +593,7 @@ def get_loss_ensemble_distill(model, ensemble_topk_probs_loaders, distill_ratio,
     Calculate the loss given the logits and targets.
     If ensemble_topk_probs_loaders is provided, use it to calculate the reference logits for KL divergence.
     """
-    # load the latest saved top-k probs from each loader and build dense distributions
+    # load the latest saved top-k probs from each loader (no densifying)
     latest_items = []
     rand_seed = np.random.randint(0, 1000000)
     for loader in ensemble_topk_probs_loaders:
@@ -610,10 +610,10 @@ def get_loss_ensemble_distill(model, ensemble_topk_probs_loaders, distill_ratio,
     assert X.shape[0] == batch_size
 
     for it in latest_items[1:]:
-        assert it['X'].shape == X.shape and it['Y'].shape == Y.shape, "Mismatched X/Y shapes across ensemble loaders"
-        assert it['vocab_size'] == vocab_size, "Mismatched vocab sizes across ensemble loaders"
+        assert it['X'].shape == X.shape and it['Y'].shape == Y.shape, f"Mismatched X/Y shapes across ensemble loaders: {it['X'].shape} != {X.shape} or {it['Y'].shape} != {Y.shape}"
+        assert it['vocab_size'] == vocab_size, f"Mismatched vocab sizes across ensemble loaders: {it['vocab_size']} != {vocab_size}"
         # check X == it['X'] for all items in latest_items
-        assert torch.all(X == it['X']), "Mismatched X across ensemble loaders"
+        assert torch.all(X == it['X']), f"Mismatched X across ensemble loaders"
 
     # infer device from model parameters
     try:
@@ -626,24 +626,6 @@ def get_loss_ensemble_distill(model, ensemble_topk_probs_loaders, distill_ratio,
     X = X.to(model_device)
     Y = Y.to(model_device)
 
-    # reconstruct dense probs for each teacher and average
-    dense_probs_list = []
-    for it in latest_items:
-        probs = it['probs']        # (B, T, K)
-        indices = it['indices']    # (B, T, K)
-        K = probs.shape[-1]
-
-        probs_flat = probs.view(-1, K)               # (B*T, K)
-        indices_flat = indices.view(-1, K)           # (B*T, K)
-        dense = torch.zeros((B * T, vocab_size), dtype=probs.dtype)
-        dense.scatter_(1, indices_flat, probs_flat)
-        dense = dense.view(B, T, vocab_size)         # (B, T, V)
-        dense_probs_list.append(dense)
-
-    with torch.no_grad():
-        ensemble_probs = torch.stack(dense_probs_list, dim=0).mean(dim=0)  # (B, T, V)
-
-    ensemble_probs = ensemble_probs.to(model_device)
     # forward current model on X to get logits
     if hasattr(model, 'forward'):
         outputs = model(X)
@@ -657,9 +639,36 @@ def get_loss_ensemble_distill(model, ensemble_topk_probs_loaders, distill_ratio,
     # MLE loss per token
     hard_loss = F.cross_entropy(logits.view(-1, V), Y.view(-1), reduction='none')  # (B*T,)
 
-    # Distillation KL (forward KL)
-    soft_log_prob = F.log_softmax(logits.view(-1, V), dim=-1)                     # (B*T, V)
-    kl = F.kl_div(soft_log_prob, ensemble_probs.view(-1, V), reduction='none').sum(dim=-1)  # (B*T,)
+    # Distillation KL (forward KL) computed via gather on teacher top-k indices, averaged across teachers
+    logits_bt_v = logits.view(-1, V)
+    log_q = F.log_softmax(logits_bt_v, dim=-1)  # (B*T,V)
+
+    kl_terms = []
+    with torch.no_grad():
+        pass
+    # compute per-teacher KL without densifying; normalize teacher probs over top-k
+    for it in latest_items:
+        probs_k = it['probs']  # (B,T,K) on CPU
+        idx_k = it['indices']  # (B,T,K) on CPU
+        # ensure types
+        if probs_k.dtype != torch.float32:
+            probs_k = probs_k.float()
+        idx_k = idx_k.long()
+        # move to model device non-blocking if pinned
+        probs_k = probs_k.to(model_device, non_blocking=True)
+        idx_k = idx_k.to(model_device, non_blocking=True)
+        K = probs_k.size(-1)
+        probs_bt_k = probs_k.view(-1, K)
+        idx_bt_k = idx_k.view(-1, K)
+        # renormalize teacher probs over its support to avoid missing tail mass
+        teacher_sum = probs_bt_k.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+        p_norm = probs_bt_k / teacher_sum
+        # gather student log-probs at teacher indices
+        log_q_k = log_q.gather(1, idx_bt_k)
+        # KL(P||Q) = sum p*(log p - log q)
+        kl_i = (p_norm * (p_norm.clamp_min(1e-8).log() - log_q_k)).sum(dim=-1)  # (B*T,)
+        kl_terms.append(kl_i)
+    kl = torch.stack(kl_terms, dim=0).mean(dim=0)  # (B*T,)
 
     # Weighted sum and mean over tokens
     loss = hard_loss * (1 - distill_ratio) + kl * distill_ratio

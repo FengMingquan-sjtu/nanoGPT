@@ -6,7 +6,7 @@ import torch
 
 
 class TopkProbsLoader:
-    def __init__(self, topk_probs_dir, top_k, enforce_rank_match=True, load_rank=None):
+    def __init__(self, topk_probs_dir, top_k, enforce_rank_match=True, load_rank=None, pin_memory=False):
         self.topk_probs_dir = topk_probs_dir
         self.top_k = int(top_k) if top_k is not None else 0
         os.makedirs(self.topk_probs_dir, exist_ok=True)
@@ -16,6 +16,7 @@ class TopkProbsLoader:
         self.enforce_rank_match = bool(enforce_rank_match)
         self.load_rank = int(load_rank) if load_rank is not None else self.rank
         self._counter = 0
+        self.pin_memory = bool(pin_memory)
 
         max_step = 0
         max_rank = 0
@@ -29,6 +30,77 @@ class TopkProbsLoader:
             max_rank = max(max_rank, rank)
         self.max_step = max_step
         self.max_rank = max_rank
+        # async prefetch state
+        self._prefetch_thread = None
+        self._prefetch_queue = []
+        self._prefetch_lock = None
+        try:
+            import threading
+            self._prefetch_lock = threading.Lock()
+        except Exception:
+            self._prefetch_lock = None
+
+    def start_prefetch(self, batch_size, queue_size=2):
+        """
+        Start a background thread to prefetch next files into a small queue.
+        """
+        try:
+            import threading
+        except Exception:
+            return
+        if self._prefetch_thread is not None and self._prefetch_thread.is_alive():
+            return
+        def _worker():
+            local_counter = self._counter
+            while True:
+                with self._prefetch_lock:
+                    if len(self._prefetch_queue) >= queue_size:
+                        time.sleep(0.005)
+                        continue
+                step = local_counter % (self.max_step + 1)
+                rank = self.rank % (self.max_rank + 1)
+                fpath = os.path.join(self.topk_probs_dir, f"topk_step{step:07d}_rank{rank}.npz")
+                try:
+                    with np.load(fpath, mmap_mode='r') as data:
+                        probs = torch.from_numpy(data['probs'])
+                        indices = torch.from_numpy(data['indices'])
+                        X = torch.from_numpy(data['X'])
+                        Y = torch.from_numpy(data['Y'])
+                        top_k = int(data['top_k'][0]) if 'top_k' in data else probs.shape[-1]
+                        vocab_size = int(data['shape'][-1]) if 'shape' in data else -1
+                        item = {
+                            'probs': probs,
+                            'indices': indices,
+                            'X': X,
+                            'Y': Y,
+                            'top_k': top_k,
+                            'vocab_size': vocab_size,
+                            'path': fpath,
+                        }
+                except Exception:
+                    break
+                with self._prefetch_lock:
+                    self._prefetch_queue.append(item)
+                local_counter += 1
+        self._prefetch_thread = threading.Thread(target=_worker, daemon=True)
+        self._prefetch_thread.start()
+
+    def _pop_prefetched(self):
+        if self._prefetch_lock is None:
+            return None
+        with self._prefetch_lock:
+            if self._prefetch_queue:
+                return self._prefetch_queue.pop(0)
+        return None
+
+    def _pop_prefetched_path(self, expected_path):
+        if self._prefetch_lock is None:
+            return None
+        with self._prefetch_lock:
+            for i, item in enumerate(self._prefetch_queue):
+                if item.get('path') == expected_path:
+                    return self._prefetch_queue.pop(i)
+        return None
 
     @torch.no_grad()
     def save_topk_probs(self, logits, X, Y):
@@ -91,33 +163,62 @@ class TopkProbsLoader:
 
 
         fpath = os.path.join(self.topk_probs_dir, f"topk_step{step:07d}_rank{rank}.npz")
-        with np.load(fpath) as data:
-            probs = torch.from_numpy(data['probs'].astype(np.float32))
-            indices = torch.from_numpy(data['indices'].astype(np.int64))
-            X = torch.from_numpy(data['X'].astype(np.int64))
-            Y = torch.from_numpy(data['Y'].astype(np.int64))
-            top_k = int(data['top_k'][0]) if 'top_k' in data else probs.shape[-1]
-            vocab_size = int(data['shape'][-1]) if 'shape' in data else -1
+        # If prefetch is running, block until the expected path is available to ensure
+        # all processes advance the counter in lockstep. Otherwise, do synchronous load.
+        #if self._prefetch_thread is not None and self._prefetch_thread.is_alive():
+        pref = self._pop_prefetched_path(fpath)
+            #while pref is None:
+            #    time.sleep(0.001)
+            #    pref = self._pop_prefetched_path(fpath)
+        if pref is not None:
+            probs = pref['probs']
+            indices = pref['indices']
+            X = pref['X']
+            Y = pref['Y']
+            top_k = pref['top_k']
+            vocab_size = pref['vocab_size']
+        else:
+            with np.load(fpath, mmap_mode='r') as data:
+                # load as views first; defer dtype conversion until after sampling
+                probs = torch.from_numpy(data['probs'])
+                indices = torch.from_numpy(data['indices'])
+                X = torch.from_numpy(data['X'])
+                Y = torch.from_numpy(data['Y'])
+                top_k = int(data['top_k'][0]) if 'top_k' in data else probs.shape[-1]
+                vocab_size = int(data['shape'][-1]) if 'shape' in data else -1
             self._counter += 1
-            if probs.shape[0] > batch_size:
-                # random sample batch_size from probs
-                idx = torch.randint(0, probs.shape[0], (batch_size,), generator=torch.Generator().manual_seed(int(rand_seed)))
-                probs = probs[idx].contiguous()
-                indices = indices[idx].contiguous()
-                X = X[idx].contiguous()
-                Y = Y[idx].contiguous()
-            else:
-                raise ValueError(f"Probs shape {probs.shape} is less than batch size {batch_size}")
-            return {
-                'probs': probs,
-                'indices': indices,
-                'X': X,
-                'Y': Y,
-                'top_k': top_k,
-                'vocab_size': vocab_size,
-                'path': fpath,
-            }
-        return None
+            
+        if probs.shape[0] > batch_size:
+            # random sample batch_size from probs
+            idx = torch.randint(0, probs.shape[0], (batch_size,), generator=torch.Generator().manual_seed(int(rand_seed)))
+            probs = probs[idx].contiguous()
+            indices = indices[idx].contiguous()
+            X = X[idx].contiguous()
+            Y = Y[idx].contiguous()
+        elif probs.shape[0] == batch_size:
+            pass
+        else:
+            raise ValueError(f"Probs shape {probs.shape} is less than batch size {batch_size}")
+        # now upcast to expected dtypes
+        probs = probs.to(torch.float32)
+        indices = indices.to(torch.int64)
+        X = X.to(torch.int64)
+        Y = Y.to(torch.int64)
+        if self.pin_memory and torch.cuda.is_available():
+            probs = probs.pin_memory()
+            indices = indices.pin_memory()
+            X = X.pin_memory()
+            Y = Y.pin_memory()
+        return {
+            'probs': probs,
+            'indices': indices,
+            'X': X,
+            'Y': Y,
+            'top_k': top_k,
+            'vocab_size': vocab_size,
+            'path': fpath,
+        }
+        
     def load_topk_probs_step_half(self, step):
         """
         Load top-k probability single file for a specific step. half of batch size used.

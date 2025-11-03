@@ -74,6 +74,7 @@ smooth_kernel_size = 1 # kernel size for smoothing the token loss, 1 means no sm
 attn_select = False # 
 # distill
 distill_ratio = 0.9 # weight for distillation loss
+distill_ratio_mode = "fixed" # "fixed" or "dynamic-lr"
 temperature = 2.0 # temperature for distillation
 distill_top_k = 0 # if > 0, use top-k distillation
 distill_online = False # if True, use online distillation, from ref_model_ckpt_2
@@ -416,7 +417,11 @@ else: # huggingface model
         state_dict = remove_prefix_from_state_dict(state_dict)
         model.load_state_dict(state_dict)
         iter_num = 0
-        topk_probs_loader = TopkProbsLoader(topk_probs_dir, distill_top_k)
+        topk_probs_loader = TopkProbsLoader(topk_probs_dir, distill_top_k, pin_memory=True)
+        try:
+            topk_probs_loader.start_prefetch(batch_size)
+        except Exception:
+            pass
     else:
         raise NotImplementedError(f"Train mode {train_mode} is not implemented")
     if gradient_checkpointing:
@@ -607,6 +612,15 @@ def get_lr(it):
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff ranges 0..1
     return min_lr + coeff * (learning_rate - min_lr)
 
+
+def get_distill_ratio(raw_distill_ratio, distill_ratio_mode, lr):
+    if distill_ratio_mode == "fixed":
+        return raw_distill_ratio
+    elif distill_ratio_mode == "dynamic-lr":
+        return raw_distill_ratio * (lr / learning_rate)
+    else:
+        raise ValueError(f"Unknown distill_ratio_mode: {distill_ratio_mode}")
+
 # logging
 if wandb_log and master_process:
     import wandb
@@ -624,7 +638,16 @@ running_mfu = -1.0
 ref_model_ckpt_2_name = ""
 if loss_type == 'ensemble_distill':
     ensemble_topk_probs_dirs = ensemble_topk_probs_dirs.split(';')
-    ensemble_topk_probs_loaders = [TopkProbsLoader(dir, distill_top_k) for dir in ensemble_topk_probs_dirs]
+    # delete the last empty directory
+    if ensemble_topk_probs_dirs[-1] == '':
+        ensemble_topk_probs_dirs = ensemble_topk_probs_dirs[:-1]
+    ensemble_topk_probs_loaders = [TopkProbsLoader(dir, distill_top_k, pin_memory=True) for dir in ensemble_topk_probs_dirs]
+    # start background prefetch for each loader
+    for loader in ensemble_topk_probs_loaders:
+        try:
+            loader.start_prefetch(batch_size)
+        except Exception:
+            pass
 while True:
 
     # determine and set the learning rate for this iteration
@@ -640,7 +663,8 @@ while True:
     # evaluate the loss on train/val sets and write checkpoints
     if (iter_num % eval_interval == 0 or iter_num==eval_interval//2) and master_process and train_mode != "infer_topk_probs":
         losses = estimate_loss()
-        log_dict = {"lr": lr, "mfu": running_mfu*100,}
+        cur_distill_ratio = get_distill_ratio(distill_ratio, distill_ratio_mode, lr)
+        log_dict = {"lr": lr, "mfu": running_mfu*100, "distill_ratio": cur_distill_ratio}
         for i, dataset_prefix_i in enumerate(dataset_prefix.split(',')):
             log_dict[f"train/loss-{dataset_prefix_i}"] = losses['train'][i]
             log_dict[f"val/loss-{dataset_prefix_i}"] = losses['val'][i]
@@ -693,7 +717,8 @@ while True:
             
             elif loss_type == 'ensemble_distill':
                 with ctx:
-                    loss = get_loss_ensemble_distill(model, ensemble_topk_probs_loaders, distill_ratio, batch_size)
+                    cur_distill_ratio = get_distill_ratio(distill_ratio, distill_ratio_mode, lr)
+                    loss = get_loss_ensemble_distill(model, ensemble_topk_probs_loaders, cur_distill_ratio, batch_size)
                 model.backward(loss)
                 model.step()
 
@@ -707,7 +732,8 @@ while True:
                     
                     
                     if loss_type == 'distill':
-                        loss = get_loss_distill(logits, Y, ref_model, X, temperature, distill_ratio, token_keep_ratio, distill_top_k, div_mode)
+                        cur_distill_ratio = get_distill_ratio(distill_ratio, distill_ratio_mode, lr)
+                        loss = get_loss_distill(logits, Y, ref_model, X, temperature, cur_distill_ratio, token_keep_ratio, distill_top_k, div_mode)
 
                     elif loss_type == 'rho':
                         loss = get_loss_rho(logits, Y, ref_model, X, token_keep_ratio, 

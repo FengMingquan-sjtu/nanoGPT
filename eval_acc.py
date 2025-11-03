@@ -11,6 +11,7 @@ from contextlib import nullcontext
 import ast
 import shutil
 import multiprocessing
+import torch.distributed as dist
 multiprocessing.set_start_method('spawn', force=True)
 
 import wandb
@@ -77,9 +78,14 @@ def main():
     args = parser.parse_args()
     
 
-    if args.ckpt_step == 0:
+    if args.ckpt_step == 0: #single, raw model
         hf_model_path = args.model_path
-    else:
+    elif ';' in args.model_path: #ensemble model
+        from lm_eval.ensemble_utils.build_ensemble import build 
+        n_models = len(args.model_path.split(';'))
+        hf_model_path = build(args.model_path, n_models)
+        print(f"Ensemble model paths: {hf_model_path}, n_models: {n_models}")
+    else: #single, ckpt model
         args = auto_parse_path(args)
         hf_model_path = os.path.join(args.model_path, f"ckpt-{args.ckpt_step}-hf")
 
@@ -94,12 +100,14 @@ def main():
         #    hf_model_path_ = model
         #else:
         #    hf_model_path_ = hf_model_path
-
+        qwen2_path = "/prodcpfs/user/fengmingquan/model/Qwen2-0.5B"
         eval_model=HFLM(
             pretrained=hf_model_path, 
-            tokenizer=hf_model_path, 
+            tokenizer=qwen2_path if "qwen" in args.model_path else hf_model_path,
             truncation=True,
-            max_length=args.block_size,)
+            max_length=args.block_size,
+            trust_remote_code=True,
+            )
 
 
     elif args.backend == "vllm":
@@ -174,6 +182,10 @@ def main():
             if args.ckpt_step == 0:
                 wandb_name = args.model_path.split('/')[-1]
                 wandb.init(project="owm", name=wandb_name,)
+            elif ';' in args.model_path:
+                wandb_name = args.model_path.split('/')[-1]
+                wandb_name += f"-esb-{len(args.model_path.split(';'))}"
+                wandb.init(project="owm", name=wandb_name,)
             else:
                 wandb.init(id=args.wandb_id, resume='must', project="owm")
             for dataset_name, dataset_res in results['results'].items():
@@ -199,3 +211,5 @@ if __name__ == '__main__':
 
     main()
     
+    # destroy processes group
+    dist.destroy_process_group()
