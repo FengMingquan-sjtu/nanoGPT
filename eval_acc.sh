@@ -50,8 +50,8 @@ checkpoints=(
 )
 datasets=(
 #    "mmlu,arc_challenge,arc_easy,hellaswag,winogrande,mbpp,humaneval,gsm8k,gpqa_main_n_shot"
-#     "gsm8k,mmlu_pro"
-    "arc_challenge,arc_easy,hellaswag,winogrande,piqa,openbookqa"
+    "gsm8k,mmlu_pro"
+#    "arc_challenge,arc_easy,hellaswag,winogrande,piqa,openbookqa"
 #    "hellaswag"
 #    "arc_challenge,arc_easy"
 #    "winogrande,piqa,openbookqa"

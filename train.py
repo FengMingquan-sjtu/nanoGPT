@@ -103,6 +103,7 @@ dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 # adamw optimizer
 use_muon=False
+use_ko=False
 learning_rate = 6e-4 # max learning rate
 max_iters = 600000 # total number of training iterations
 weight_decay = 1e-1
@@ -137,6 +138,9 @@ exec(open('configurator.py').read()) # overrides from command line or config fil
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
 np.random.seed(np_seed)
 # -----------------------------------------------------------------------------
+if use_ko:
+    from ko import apply_gradient_collision
+
 if int(os.environ.get('RANK', -1)) <= 0:
     if train_mode != 'resume':
         out_folder = os.path.join(out_dir, f'{time.strftime("%Y-%m-%d_%H-%M-%S")}')
@@ -748,8 +752,49 @@ while True:
                 X, Y = get_batch('train')       
                 model.step() # NOTE: needs to be called inside the micro_step loop in deepspeed
 
-    else:
-        raise NotImplementedError("Only deepspeed is supported now.")
+    else: # huggingface transformers implementation
+        # forward backward update, with optional gradient accumulation to simulate larger batch size
+        # and using the GradScaler if data type is float16
+        for micro_step in range(gradient_accumulation_steps):
+            if ddp:
+                model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
+            with ctx:
+                model.train() 
+                if init_from.startswith('gpt2'):
+                    logits, _ = model(X, Y)
+                else:
+                    logits = model(X).logits
+                
+                loss = get_loss_rho(logits, Y, ref_model, X, token_keep_ratio, reverse_select, batch_select, scale_select, mask_select, value_select, ref_model_2, smooth_kernel_size, attn_select)
+                loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
+            # immediately async prefetch next batch while model is doing the forward pass on the GPU
+            X, Y = get_batch('train')
+            # backward pass, with gradient scaling if training in fp16
+            scaler.scale(loss).backward()
+        # clip the gradient
+        if grad_clip != 0.0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        # apply gradient collision to the output layer (optional)
+        if use_ko:
+            for layer in range(len(model.module.model.layers)):
+                last_decoder_layer = model.module.model.layers[layer]
+                last_attention_layer = last_decoder_layer.self_attn
+                last_ffn_layer = last_decoder_layer.mlp
+                last_ffn_layer_output = last_ffn_layer.down_proj
+                
+                apply_gradient_collision(last_ffn_layer_output, collision_rate=0.1, collision_type="wg", noise_scale=1e-4, thres=0.)
+            
+            # apply gradient collision to the output layer (OOM Error)
+            # output_layer = model.module.lm_head
+            #apply_gradient_collision(output_layer, collision_rate=0.1, collision_type="wg", noise_scale=1e-4, thres=0.)
+
+        # step the optimizer and scaler if training in fp16
+        scaler.step(optimizer)
+        scaler.update()
+        
+        # flush the gradients as soon as we can, no need for this memory anymore
+        optimizer.zero_grad(set_to_none=True)
         
 
     # timing and logging
