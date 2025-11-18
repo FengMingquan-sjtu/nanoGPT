@@ -52,6 +52,10 @@ juicefs sync -u -p 100 --exclude "00*.parquet" oss://LTAI5tDuCoTTh6gu5PK8gFfN:6e
 
 juicefs sync -u -p 100 oss://LTAI5tDuCoTTh6gu5PK8gFfN:6eZGIEeLo81eRSqYRMHUEG2FcVTkQV@lsg-oss-chatgpt-agi-hcfs.oss-ap-southeast-1-internal.aliyuncs.com/crawl/multimodal/EleutherAI/fineweb-edu-dedup-10b /prodcpfs/user/fengmingquan/dataset/raw/fineweb-edu-dedup-10b
 
+juicefs sync -u -p 100 oss://LTAI5tDuCoTTh6gu5PK8gFfN:6eZGIEeLo81eRSqYRMHUEG2FcVTkQV@lsh-oss-gpt-spam.oss-cn-shanghai-internal.aliyuncs.com/user/guofu/books_and_papers_scored/books_math_cn_0527 /prodcpfs/user/fengmingquan/dataset/raw/books_math_cn_0527
+
+juicefs sync -u -p 100 oss://LTAI5tDuCoTTh6gu5PK8gFfN:6eZGIEeLo81eRSqYRMHUEG2FcVTkQV@lsh-oss-gpt-spam.oss-cn-shanghai-internal.aliyuncs.com/user/guofu/books_and_papers_scored/books_math_en_0527 /prodcpfs/user/fengmingquan/dataset/raw/books_math_en_0527
+
 #git config --global user.email "fengmingquan@sjtu.edu.cn"
 #git config --global user.name "fengmingquan"
 

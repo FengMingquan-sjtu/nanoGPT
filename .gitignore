@@ -20,3 +20,4 @@ test.ipynb
 hf_key.txt
 *.json
 deepspeed_config.json
+data/red/samples/*.txt
