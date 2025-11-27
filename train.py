@@ -777,16 +777,18 @@ while True:
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         # apply gradient collision to the output layer (optional)
         if use_ko:
-            for layer in range(len(model.module.model.layers)):
+            #for layer in range(0, len(model.module.model.layers)):
+            if True:
+                layer = -1 # last layer
                 last_decoder_layer = model.module.model.layers[layer]
                 last_attention_layer = last_decoder_layer.self_attn
                 last_ffn_layer = last_decoder_layer.mlp
-                last_ffn_layer_output = last_ffn_layer.down_proj
-                
-                apply_gradient_collision(last_ffn_layer_output, collision_rate=0.1, collision_type="wg", noise_scale=1e-4, thres=0.)
+                for layer_output in [last_attention_layer.q_proj, last_attention_layer.k_proj, last_attention_layer.v_proj, last_attention_layer.o_proj, last_ffn_layer.up_proj, last_ffn_layer.down_proj, last_ffn_layer.gate_proj]:
+                    apply_gradient_collision(layer_output, collision_rate=0.1, collision_type="wg", noise_scale=1e-4, thres=0.)
+
             
             # apply gradient collision to the output layer (OOM Error)
-            # output_layer = model.module.lm_head
+            #output_layer = model.module.lm_head
             #apply_gradient_collision(output_layer, collision_rate=0.1, collision_type="wg", noise_scale=1e-4, thres=0.)
 
         # step the optimizer and scaler if training in fp16

@@ -100,10 +100,10 @@ def main():
         #    hf_model_path_ = model
         #else:
         #    hf_model_path_ = hf_model_path
-        qwen2_path = "/prodcpfs/user/fengmingquan/model/Qwen2-0.5B"
+        #qwen2_path = "/prodcpfs/user/fengmingquan/model/Qwen2-0.5B"
         eval_model=HFLM(
             pretrained=hf_model_path, 
-            tokenizer=qwen2_path if "qwen" in args.model_path else hf_model_path,
+            tokenizer=hf_model_path,
             truncation=True,
             max_length=args.block_size,
             trust_remote_code=True,
